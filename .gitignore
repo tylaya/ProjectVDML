@@ -1,0 +1,11 @@
+node_modules/
+.venv/
+__pycache__/
+*.py[cod]
+dist/
+backend/housing.db
+backend/housing.db-shm
+backend/housing.db-wal
+*.egg-info/
+.env
+.DS_Store
