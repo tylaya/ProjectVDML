@@ -1,5 +1,6 @@
 import json
 import logging
+import os
 import sqlite3
 import subprocess
 import sys
@@ -9,14 +10,41 @@ from pathlib import Path
 
 import joblib
 import pandas as pd
-from fastapi import FastAPI, HTTPException, Query
+from dotenv import load_dotenv
+from fastapi import Depends, FastAPI, HTTPException, Query, Response
 from fastapi.middleware.cors import CORSMiddleware
 
+from auth import (
+    clear_session_cookie,
+    current_user,
+    ensure_session_configuration,
+    require_admin,
+    require_student,
+    set_session_cookie,
+    verify_google_credential,
+)
 from database import get_connection, get_settings, init_db, save_settings
-from schemas import InspectionInput, InspectionResult, Settings, Student, StudentCreate, StudentUpdate
+from schemas import (
+    ApplicationCreate,
+    ApplicationDecision,
+    GoogleCredential,
+    InspectionInput,
+    InspectionResult,
+    QueueSimulationRequest,
+    Settings,
+    Student,
+    StudentCreate,
+    StudentUpdate,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from ml.queue_modules import run_synthetic_week
+
+load_dotenv(Path(__file__).resolve().parent / ".env")
 MODEL_PATH = ROOT / "ml" / "artifacts" / "housing_model.joblib"
 METRICS_PATH = ROOT / "ml" / "artifacts" / "model_metrics.json"
 FEATURES = ["jarak_km", "waktu_tempuh_menit", "kelurahan", "akses_jalan"]
@@ -73,10 +101,16 @@ async def lifespan(_app: FastAPI):
     yield
 
 
-app = FastAPI(title="Village Dean Housing Verification API", version="1.0.0", lifespan=lifespan)
+app = FastAPI(title="SIGAP-VD Village Dean API", version="1.1.0", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+    allow_origins=[
+        origin.strip()
+        for origin in os.environ.get(
+            "FRONTEND_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173"
+        ).split(",")
+        if origin.strip()
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -93,8 +127,129 @@ def health():
     return {"status": "ok", "model_loaded": model is not None, "model_error": model_error}
 
 
+@app.post("/api/auth/google")
+def login_with_google(payload: GoogleCredential, response: Response):
+    ensure_session_configuration()
+    user = verify_google_credential(
+        payload.credential, payload.email, payload.requested_role
+    )
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    with get_connection() as connection:
+        connection.execute(
+            """INSERT INTO users (email, display_name, role, created_at, last_login_at)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(email) DO UPDATE SET
+                display_name=excluded.display_name,
+                role=excluded.role,
+                last_login_at=excluded.last_login_at""",
+            (user["email"], user["name"], user["role"], now, now),
+        )
+        connection.execute(
+            "INSERT INTO audit_logs (actor_email, action, object_type, object_id, occurred_at) "
+            "VALUES (?, 'login', 'user', ?, ?)",
+            (user["email"], user["email"], now),
+        )
+    set_session_cookie(response, user)
+    return user
+
+
+@app.get("/api/auth/me")
+def read_current_user(user: dict = Depends(current_user)):
+    return user
+
+
+@app.post("/api/auth/logout")
+def logout(response: Response, user: dict = Depends(current_user)):
+    clear_session_cookie(response)
+    return {"message": f"Sesi {user['email']} telah berakhir."}
+
+
+@app.get("/api/applications/me")
+def my_applications(user: dict = Depends(require_student)):
+    with get_connection() as connection:
+        rows = connection.execute(
+            "SELECT * FROM applications WHERE student_email = ? ORDER BY id DESC",
+            (user["email"],),
+        ).fetchall()
+    return [as_dict(row) for row in rows]
+
+
+@app.post("/api/applications", status_code=201)
+def create_application(payload: ApplicationCreate, user: dict = Depends(require_student)):
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    with get_connection() as connection:
+        cursor = connection.execute(
+            """INSERT INTO applications (
+                student_email, request_type, category, residence_type, semester, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (
+                user["email"],
+                payload.request_type,
+                payload.category,
+                payload.residence_type,
+                payload.semester.strip(),
+                now,
+                now,
+            ),
+        )
+        connection.execute(
+            "INSERT INTO audit_logs (actor_email, action, object_type, object_id, occurred_at) "
+            "VALUES (?, 'application_submitted', 'application', ?, ?)",
+            (user["email"], str(cursor.lastrowid), now),
+        )
+        row = connection.execute(
+            "SELECT * FROM applications WHERE id = ?", (cursor.lastrowid,)
+        ).fetchone()
+    return as_dict(row)
+
+
+@app.get("/api/applications")
+def list_applications(
+    status: str = Query(default="", max_length=40),
+    _user: dict = Depends(require_admin),
+):
+    valid_statuses = ("Menunggu verifikasi", "Perlu revisi", "Disetujui", "Ditolak")
+    if status and status not in valid_statuses:
+        raise HTTPException(status_code=422, detail="Filter status pengajuan tidak dikenal.")
+    query = "SELECT * FROM applications"
+    parameters: tuple[str, ...] = ()
+    if status in valid_statuses:
+        query += " WHERE status = ?"
+        parameters = (status,)
+    query += " ORDER BY CASE status WHEN 'Menunggu verifikasi' THEN 0 ELSE 1 END, id DESC"
+    with get_connection() as connection:
+        rows = connection.execute(query, parameters).fetchall()
+    return [as_dict(row) for row in rows]
+
+
+@app.patch("/api/applications/{application_id}")
+def decide_application(
+    application_id: int,
+    payload: ApplicationDecision,
+    user: dict = Depends(require_admin),
+):
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    with get_connection() as connection:
+        cursor = connection.execute(
+            """UPDATE applications SET status = ?, admin_note = ?, updated_at = ?
+            WHERE id = ?""",
+            (payload.status, payload.admin_note.strip(), now, application_id),
+        )
+        if cursor.rowcount == 0:
+            raise HTTPException(status_code=404, detail="Pengajuan tidak ditemukan.")
+        connection.execute(
+            "INSERT INTO audit_logs (actor_email, action, object_type, object_id, occurred_at) "
+            "VALUES (?, ?, 'application', ?, ?)",
+            (user["email"], f"application_{payload.status.lower().replace(' ', '_')}", str(application_id), now),
+        )
+        row = connection.execute(
+            "SELECT * FROM applications WHERE id = ?", (application_id,)
+        ).fetchone()
+    return as_dict(row)
+
+
 @app.get("/api/dashboard")
-def dashboard():
+def dashboard(_user: dict = Depends(require_admin)):
     with get_connection() as connection:
         total_students = connection.execute("SELECT COUNT(*) FROM students").fetchone()[0]
         category_rows = connection.execute(
@@ -131,7 +286,11 @@ def dashboard():
 
 
 @app.get("/api/students", response_model=list[Student])
-def list_students(search: str = Query(default="", max_length=120), category: str = ""):
+def list_students(
+    search: str = Query(default="", max_length=120),
+    category: str = "",
+    _user: dict = Depends(require_admin),
+):
     query = "SELECT * FROM students WHERE 1=1"
     parameters = []
     if search.strip():
@@ -148,7 +307,7 @@ def list_students(search: str = Query(default="", max_length=120), category: str
 
 
 @app.post("/api/students", response_model=Student, status_code=201)
-def create_student(student: StudentCreate):
+def create_student(student: StudentCreate, _user: dict = Depends(require_admin)):
     try:
         with get_connection() as connection:
             connection.execute(
@@ -165,7 +324,7 @@ def create_student(student: StudentCreate):
 
 
 @app.put("/api/students/{student_id}", response_model=Student)
-def update_student(student_id: str, student: StudentUpdate):
+def update_student(student_id: str, student: StudentUpdate, _user: dict = Depends(require_admin)):
     with get_connection() as connection:
         cursor = connection.execute(
             """UPDATE students SET nama_mahasiswa=:nama_mahasiswa, nama_kost=:nama_kost,
@@ -179,7 +338,7 @@ def update_student(student_id: str, student: StudentUpdate):
 
 
 @app.delete("/api/students/{student_id}")
-def delete_student(student_id: str):
+def delete_student(student_id: str, _user: dict = Depends(require_admin)):
     with get_connection() as connection:
         cursor = connection.execute("DELETE FROM students WHERE id = ?", (student_id,))
         if cursor.rowcount == 0:
@@ -188,7 +347,7 @@ def delete_student(student_id: str):
 
 
 @app.post("/api/inspections/analyze", response_model=InspectionResult, status_code=201)
-def analyze_inspection(payload: InspectionInput):
+def analyze_inspection(payload: InspectionInput, _user: dict = Depends(require_admin)):
     if model is None:
         raise HTTPException(
             status_code=503,
@@ -257,6 +416,7 @@ def analyze_inspection(payload: InspectionInput):
 def list_inspections(
     search: str = Query(default="", max_length=120),
     status: str = Query(default=""),
+    _user: dict = Depends(require_admin),
 ):
     query = "SELECT * FROM inspections WHERE 1=1"
     parameters = []
@@ -274,17 +434,17 @@ def list_inspections(
 
 
 @app.get("/api/settings", response_model=Settings)
-def read_settings():
+def read_settings(_user: dict = Depends(require_admin)):
     return get_settings()
 
 
 @app.put("/api/settings", response_model=Settings)
-def update_settings(settings: Settings):
+def update_settings(settings: Settings, _user: dict = Depends(require_admin)):
     return save_settings(settings.model_dump())
 
 
 @app.get("/api/ml/info")
-def ml_info():
+def ml_info(_user: dict = Depends(require_admin)):
     if model_metrics is None:
         return {
             "status": "unavailable",
@@ -302,3 +462,19 @@ def ml_info():
             for key in ("accuracy", "precision", "recall", "f1_score")
         },
     }
+
+
+@app.post("/api/ml/queue-demo")
+def queue_demo(
+    payload: QueueSimulationRequest,
+    _user: dict = Depends(require_admin),
+):
+    settings = get_settings()
+    return run_synthetic_week(
+        start_date=payload.start_date,
+        service_counters=payload.service_counters,
+        applicants_per_day=payload.applicants_per_day,
+        seed=payload.seed,
+        distance_threshold_km=settings["distance_threshold_km"],
+        review_zone_km=settings["verification_zone_km"],
+    )

@@ -1,12 +1,20 @@
-import type { Dashboard, Inspection, InspectionInput, ModelInfo, Settings, Student } from '../types';
+import type { Application, ApplicationDecision, ApplicationInput, AuthUser, Dashboard, Inspection, InspectionInput, LoginRole, ModelInfo, QueueModulesResult, QueueSimulationInput, Settings, Student } from '../types';
 
 const API_URL = import.meta.env.VITE_API_URL ?? 'http://localhost:8000';
+
+export class ApiError extends Error {
+  constructor(message: string, public readonly status: number) {
+    super(message);
+    this.name = 'ApiError';
+  }
+}
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   let response: Response;
   try {
     response = await fetch(`${API_URL}${path}`, {
       ...init,
+      credentials: 'include',
       headers: { 'Content-Type': 'application/json', ...init?.headers },
     });
   } catch {
@@ -14,13 +22,26 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   }
   if (!response.ok) {
     const body = await response.json().catch(() => null) as { detail?: string } | null;
-    throw new Error(body?.detail ?? `Permintaan gagal (${response.status}).`);
+    throw new ApiError(body?.detail ?? `Permintaan gagal (${response.status}).`, response.status);
   }
   return response.json() as Promise<T>;
 }
 
 export const api = {
   health: () => request<{ status: string }>('/api/health'),
+  me: () => request<AuthUser>('/api/auth/me'),
+  login: (credential: string, email: string, requested_role: LoginRole) =>
+    request<AuthUser>('/api/auth/google', {
+      method: 'POST',
+      body: JSON.stringify({ credential, email, requested_role }),
+    }),
+  logout: () => request<{ message: string }>('/api/auth/logout', { method: 'POST' }),
+  myApplications: () => request<Application[]>('/api/applications/me'),
+  submitApplication: (application: ApplicationInput) =>
+    request<Application>('/api/applications', { method: 'POST', body: JSON.stringify(application) }),
+  applications: () => request<Application[]>('/api/applications'),
+  decideApplication: (id: number, decision: ApplicationDecision) =>
+    request<Application>(`/api/applications/${id}`, { method: 'PATCH', body: JSON.stringify(decision) }),
   dashboard: () => request<Dashboard>('/api/dashboard'),
   students: () => request<Student[]>('/api/students'),
   createStudent: (student: Omit<Student, 'id'> & { id: string }) =>
@@ -41,4 +62,6 @@ export const api = {
   saveSettings: (settings: Settings) =>
     request<Settings>('/api/settings', { method: 'PUT', body: JSON.stringify(settings) }),
   modelInfo: () => request<ModelInfo>('/api/ml/info'),
+  queueDemo: (input: QueueSimulationInput) =>
+    request<QueueModulesResult>('/api/ml/queue-demo', { method: 'POST', body: JSON.stringify(input) }),
 };

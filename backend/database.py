@@ -65,6 +65,33 @@ def init_db():
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS users (
+                email TEXT PRIMARY KEY,
+                display_name TEXT NOT NULL,
+                role TEXT NOT NULL CHECK (role IN ('student', 'admin')),
+                created_at TEXT NOT NULL,
+                last_login_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS applications (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                student_email TEXT NOT NULL REFERENCES users(email),
+                request_type TEXT NOT NULL,
+                category TEXT NOT NULL,
+                residence_type TEXT NOT NULL,
+                semester TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'Menunggu verifikasi',
+                admin_note TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS audit_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                actor_email TEXT NOT NULL,
+                action TEXT NOT NULL,
+                object_type TEXT NOT NULL,
+                object_id TEXT NOT NULL,
+                occurred_at TEXT NOT NULL
+            );
             """
         )
         if connection.execute("SELECT COUNT(*) FROM students").fetchone()[0] == 0:

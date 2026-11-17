@@ -2,6 +2,7 @@ import { useState } from 'react';
 import type { FormEvent } from 'react';
 import { AlertTriangle, CheckCircle2 } from 'lucide-react';
 import { CategoryBadge, StatusBadge } from '../components/StatusBadge';
+import { HOME_ADDRESS_OPTION, HOME_NAME_OPTION, ResidenceField } from '../components/ResidenceField';
 import type { Category, Inspection, InspectionInput, RoadAccess, Student } from '../types';
 
 const empty: InspectionInput = { student_id: '', nama_mahasiswa: '', nama_kost: '', alamat_kost: '', kelurahan: 'Airmadidi Bawah', jarak_km: 1.5, waktu_tempuh_menit: 8, akses_jalan: 'Jalan Utama', kategori_terdaftar: 'Outsider Dekat' };
@@ -21,6 +22,8 @@ export function InspectionPage({ students, onAnalyze, busy, modelAvailable, mode
     try { setResult(await onAnalyze(form)); } catch (reason) { setError(reason instanceof Error ? reason.message : 'Pemeriksaan gagal.'); }
   };
   const mismatch = result && result.kategori_terdaftar !== result.prediksi_kategori;
+  const residenceNames = [...new Set([HOME_NAME_OPTION, ...students.map(student => student.nama_kost)])];
+  const residenceAddresses = [...new Set([HOME_ADDRESS_OPTION, ...students.map(student => student.alamat_kost)])];
   return <div className="space-y-5">
     <div><h2 className="text-xl font-bold text-royal">Pemeriksaan Kategori Tempat Tinggal</h2><p className="mt-1 text-sm text-slate-500">Model memberikan rekomendasi administratif yang tetap memerlukan pertimbangan petugas.</p></div>
     <div className="rounded-xl border border-purple-200 bg-purple-50 p-4 text-sm text-purple-950">Hasil prediksi merupakan dukungan verifikasi berdasarkan data yang dimasukkan, bukan keputusan final mengenai status mahasiswa.</div>
@@ -28,7 +31,10 @@ export function InspectionPage({ students, onAnalyze, busy, modelAvailable, mode
     <div className="grid gap-5 lg:grid-cols-5">
       <form onSubmit={submit} className="space-y-4 rounded-xl border bg-white p-5 lg:col-span-3"><div className="flex flex-wrap items-center justify-between gap-2 border-b pb-3"><h3 className="font-semibold text-royal">Data Pemeriksaan</h3><select value={selectedStudent} onChange={e => { setSelectedStudent(e.target.value); choose(e.target.value); }} className="max-w-60 rounded-lg border bg-white px-2 py-1.5 text-xs"><option value="">Isi dari data mahasiswa…</option>{students.map(s => <option key={s.id} value={s.id}>{s.id} — {s.nama_mahasiswa}</option>)}</select></div>
         {error && <p role="alert" className="rounded-lg bg-rose-50 p-3 text-sm text-rose-700">{error}</p>}
-        <div className="grid gap-3 sm:grid-cols-2">{([['student_id', 'ID (bukan NIM)'], ['nama_mahasiswa', 'Nama mahasiswa'], ['nama_kost', 'Nama kost'], ['alamat_kost', 'Alamat kost'], ['kelurahan', 'Kelurahan']] as const).map(([key, label]) => <label key={key} className="text-xs font-medium text-slate-600">{label}<input required value={form[key]} onChange={e => change(key, e.target.value)} className="mt-1 w-full rounded-lg border px-3 py-2 text-sm" /></label>)}
+        <div className="grid gap-3 sm:grid-cols-2">{([['student_id', 'ID (bukan NIM)'], ['nama_mahasiswa', 'Nama mahasiswa']] as const).map(([key, label]) => <label key={key} className="text-xs font-medium text-slate-600">{label}<input required value={form[key]} onChange={e => change(key, e.target.value)} className="mt-1 w-full rounded-lg border px-3 py-2 text-sm" /></label>)}
+          <ResidenceField label="Nama kost / hunian" value={form.nama_kost} options={residenceNames} onChange={value => change('nama_kost', value)} />
+          <ResidenceField label="Alamat kost / area domisili" value={form.alamat_kost} options={residenceAddresses} onChange={value => change('alamat_kost', value)} />
+          <label className="text-xs font-medium text-slate-600">Kelurahan<input required value={form.kelurahan} onChange={e => change('kelurahan', e.target.value)} className="mt-1 w-full rounded-lg border px-3 py-2 text-sm" /></label>
           <label className="text-xs font-medium text-slate-600">Jarak dari kampus (km)<input required type="number" min="0" step="0.1" value={form.jarak_km} onChange={e => change('jarak_km', Number(e.target.value))} className="mt-1 w-full rounded-lg border px-3 py-2 text-sm" /></label>
           <label className="text-xs font-medium text-slate-600">Waktu tempuh (menit)<input required type="number" min="1" value={form.waktu_tempuh_menit} onChange={e => change('waktu_tempuh_menit', Number(e.target.value))} className="mt-1 w-full rounded-lg border px-3 py-2 text-sm" /></label>
           <label className="text-xs font-medium text-slate-600">Akses jalan<select value={form.akses_jalan} onChange={e => change('akses_jalan', e.target.value as RoadAccess)} className="mt-1 w-full rounded-lg border bg-white px-3 py-2 text-sm"><option>Jalan Utama</option><option>Lorong</option><option>Perbukitan</option></select></label>
