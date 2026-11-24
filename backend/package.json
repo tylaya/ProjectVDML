@@ -1,0 +1,7 @@
+{
+  "name": "sigap-vd-backend-launcher",
+  "private": true,
+  "scripts": {
+    "dev": "npm --prefix ..\\frontend run dev"
+  }
+}

@@ -1,3 +1,4 @@
+import csv
 import json
 import os
 import sqlite3
@@ -70,7 +71,8 @@ def init_db():
                 display_name TEXT NOT NULL,
                 role TEXT NOT NULL CHECK (role IN ('student', 'admin')),
                 created_at TEXT NOT NULL,
-                last_login_at TEXT NOT NULL
+                last_login_at TEXT NOT NULL,
+                password_hash TEXT
             );
             CREATE TABLE IF NOT EXISTS applications (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -79,6 +81,17 @@ def init_db():
                 category TEXT NOT NULL,
                 residence_type TEXT NOT NULL,
                 semester TEXT NOT NULL,
+                nama_mahasiswa TEXT NOT NULL DEFAULT '',
+                nama_kost TEXT NOT NULL DEFAULT '',
+                alamat_kost TEXT NOT NULL DEFAULT '',
+                kelurahan TEXT NOT NULL DEFAULT '',
+                jarak_km REAL NOT NULL DEFAULT 0,
+                waktu_tempuh_menit INTEGER NOT NULL DEFAULT 0,
+                akses_jalan TEXT NOT NULL DEFAULT '',
+                ml_prediction TEXT NOT NULL DEFAULT '',
+                ml_confidence REAL NOT NULL DEFAULT 0,
+                ml_status TEXT NOT NULL DEFAULT '',
+                ml_eligible INTEGER NOT NULL DEFAULT 0,
                 status TEXT NOT NULL DEFAULT 'Menunggu verifikasi',
                 admin_note TEXT NOT NULL DEFAULT '',
                 created_at TEXT NOT NULL,
@@ -92,10 +105,46 @@ def init_db():
                 object_id TEXT NOT NULL,
                 occurred_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS application_documents (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                application_id INTEGER NOT NULL REFERENCES applications(id) ON DELETE CASCADE,
+                document_type TEXT NOT NULL CHECK (
+                    document_type IN ('ktp', 'kartu_keluarga')
+                ),
+                storage_key TEXT NOT NULL UNIQUE,
+                content_type TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                UNIQUE (application_id, document_type)
+            );
             """
         )
-        if connection.execute("SELECT COUNT(*) FROM students").fetchone()[0] == 0:
-            seed_students(connection)
+        user_columns = {
+            row["name"] for row in connection.execute("PRAGMA table_info(users)")
+        }
+        if "password_hash" not in user_columns:
+            connection.execute("ALTER TABLE users ADD COLUMN password_hash TEXT")
+        application_columns = {
+            row["name"] for row in connection.execute("PRAGMA table_info(applications)")
+        }
+        application_migrations = {
+            "nama_mahasiswa": "TEXT NOT NULL DEFAULT ''",
+            "nama_kost": "TEXT NOT NULL DEFAULT ''",
+            "alamat_kost": "TEXT NOT NULL DEFAULT ''",
+            "kelurahan": "TEXT NOT NULL DEFAULT ''",
+            "jarak_km": "REAL NOT NULL DEFAULT 0",
+            "waktu_tempuh_menit": "INTEGER NOT NULL DEFAULT 0",
+            "akses_jalan": "TEXT NOT NULL DEFAULT ''",
+            "ml_prediction": "TEXT NOT NULL DEFAULT ''",
+            "ml_confidence": "REAL NOT NULL DEFAULT 0",
+            "ml_status": "TEXT NOT NULL DEFAULT ''",
+            "ml_eligible": "INTEGER NOT NULL DEFAULT 0",
+        }
+        for column, definition in application_migrations.items():
+            if column not in application_columns:
+                connection.execute(
+                    f"ALTER TABLE applications ADD COLUMN {column} {definition}"
+                )
+        sync_village_dean_students(connection)
         if connection.execute("SELECT COUNT(*) FROM inspections").fetchone()[0] == 0:
             seed_inspections(connection)
         if connection.execute("SELECT COUNT(*) FROM settings").fetchone()[0] == 0:
@@ -103,6 +152,46 @@ def init_db():
                 "INSERT INTO settings (key, value) VALUES (?, ?)",
                 [(key, json.dumps(value, ensure_ascii=False)) for key, value in DEFAULT_SETTINGS.items()],
             )
+
+
+def sync_village_dean_students(connection):
+    csv_path = BASE_DIR.parent / "ml" / "villagedean_dataset.csv"
+    if not csv_path.exists():
+        if connection.execute("SELECT COUNT(*) FROM students").fetchone()[0] == 0:
+            seed_students(connection)
+        return
+
+    with csv_path.open("r", newline="", encoding="utf-8") as csv_file:
+        rows = list(csv.DictReader(csv_file))
+
+    required = {"id_anonim", "nama_kost", "kelurahan", "jarak_km", "kategori_outsider"}
+    if rows and required - set(rows[0].keys()):
+        raise ValueError(
+            f"Kolom dataset Village Dean tidak lengkap: {', '.join(sorted(required - set(rows[0].keys())))}"
+        )
+    if len(rows) == 0:
+        raise ValueError("Dataset Village Dean tidak boleh kosong.")
+
+    samples = []
+    for row in rows:
+        distance = float(row["jarak_km"])
+        category = "Outsider Jauh" if distance > 2.0 else "Outsider Dekat"
+        samples.append(
+            (
+                row["id_anonim"].strip(),
+                f"Mahasiswa {row['id_anonim'].strip()}",
+                row["nama_kost"].strip(),
+                f"Area {row['kelurahan'].strip()}",
+                row["kelurahan"].strip(),
+                distance,
+                category,
+            )
+        )
+    connection.executemany(
+        "INSERT OR REPLACE INTO students (id, nama_mahasiswa, nama_kost, alamat_kost, kelurahan, jarak_km, kategori_terdaftar) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        samples,
+    )
 
 
 def seed_students(connection):

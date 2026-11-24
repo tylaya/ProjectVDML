@@ -88,14 +88,16 @@ Isi nilai berikut di file yang terbuka:
 - `backend\.env`
   - `GOOGLE_CLIENT_ID=...`
   - `SESSION_SECRET=...` (minimal 32 karakter)
-  - `ADMIN_EMAILS=your.admin@unklab.ac.id`
-  - `COOKIE_SECURE=false`
+  - `ADMIN_EMAILS=adminVD@unklab.ac.id`
+  - `ADMIN_PASSWORD_HASH=...` (hash scrypt; jangan simpan password polos)
+  - `COOKIE_SECURE=false` dan `COOKIE_SAMESITE=lax` untuk localhost
+  - `FRONTEND_URL=http://localhost:5173`
   - `FRONTEND_ORIGINS=http://localhost:5173,http://127.0.0.1:5173`
 - `frontend\.env.local`
-  - `VITE_API_URL=http://localhost:8000`
+  - `VITE_API_URL=` (kosong; API lokal memakai proxy Vite same-origin)
   - `VITE_GOOGLE_CLIENT_ID=...`
 
-Di halaman login, masukkan email Google dan pilih **User/Mahasiswa** atau **Admin/Staf**, lalu tekan **Masuk**. Jika Google One Tap tidak muncul, gunakan tombol **Sign in with Google** di bawahnya. Email harus cocok dengan akun Google yang diverifikasi. Mode Admin/Staf hanya diberikan kepada email dalam `ADMIN_EMAILS`; akun admin juga dapat memilih mode User/Mahasiswa untuk membuka portal mahasiswa dengan hak akses mahasiswa.
+Mahasiswa dapat membuat akun tanpa verifikasi Google menggunakan email berformat `s` + 8 angka, misalnya `s22210609@student.unklab.ac.id`, dan password minimal 8 karakter. Login password mahasiswa yang belum memiliki akun akan membuat akun baru secara otomatis dengan password yang dimasukkan. Email di luar format mahasiswa ditolak. Admin menggunakan email yang tercantum di `ADMIN_EMAILS` dan password yang hash-nya disimpan di `ADMIN_PASSWORD_HASH`. Login Google tetap tersedia untuk admin/staf.
 
 Pada form data mahasiswa dan pemeriksaan, nama hunian serta alamat/area domisili memiliki saran dropdown dari data yang sudah tersimpan. Pilih opsi rumah bila tinggal di rumah, atau ketik pilihan lain. Gunakan area domisili umum, bukan alamat lengkap atau data pribadi nyata.
 
@@ -105,7 +107,7 @@ Setelah itu jalankan backend di terminal baru:
 cd "D:\Memories\Task\MachineLearning\FinalProjectVDML\ProjectVDML"
 .\.venv\Scripts\Activate.ps1
 cd backend
-uvicorn main:app --reload --host 0.0.0.0 --port 8000
+uvicorn main:app --reload --host 127.0.0.1 --port 8000
 ```
 
 Backend siap di:
@@ -169,18 +171,42 @@ serta data resmi dikonfirmasi.
    - `GOOGLE_CLIENT_ID`: OAuth Web Client ID.
    - `SESSION_SECRET`: nilai acak minimal 32 karakter; buat misalnya dengan
      `py -c "import secrets; print(secrets.token_urlsafe(48))"`.
-   - `ADMIN_EMAILS`: alamat Google staf yang boleh masuk ke dashboard administrasi, dipisahkan
-     koma. Jangan masukkan credential atau rahasia ke Git.
+   - `ADMIN_EMAILS`: alamat admin yang diizinkan, dipisahkan koma.
+   - `ADMIN_PASSWORD_HASH`: buat hash scrypt dari folder `backend` dengan
+     `py -c "from getpass import getpass; from auth import hash_password; print(hash_password(getpass()))"`
+     lalu simpan hasilnya, bukan password polos.
 3. Salin `frontend\.env.example` menjadi `frontend\.env.local`, lalu isi
    `VITE_GOOGLE_CLIENT_ID` dengan Client ID yang sama.
-4. Akun mahasiswa harus berakhiran `@student.unklab.ac.id`. Peran admin ditentukan backend
-   melalui `ADMIN_EMAILS`, bukan pilihan di browser.
+4. Email pendaftaran mahasiswa harus berformat `s` + 8 angka +
+   `@student.unklab.ac.id` dan diverifikasi dengan akun Google yang sama. Admin hanya dapat
+   masuk dengan alamat di `ADMIN_EMAILS` dan password yang cocok dengan `ADMIN_PASSWORD_HASH`.
 5. Untuk produksi gunakan HTTPS, set `COOKIE_SECURE=true`, batasi `FRONTEND_ORIGINS`, dan
-   lengkapi enkripsi/retensi/backup serta review privasi sebelum memproses data nyata.
+   lengkapi enkripsi/retensi/backup serta review privasi sebelum memproses data nyata. Ganti
+   password admin demo dengan password unik yang kuat sebelum deployment.
+
+### Melatih model dengan data Village Dean
+
+Letakkan data asli di `ml/villagedean_dataset.csv` dengan minimal kolom:
+
+- `jarak_km`: jarak hunian mahasiswa dari kampus dalam kilometer.
+- `kategori_outsider`: nilai `dekat` atau `jauh`.
+
+Dataset harus memuat minimal 20 baris dan kedua kategori. Data dibaca secara anonim: kolom
+`id_anonim` dan `nama_kost` tidak digunakan untuk pelatihan. Jalankan pelatihan dari root
+proyek:
+
+```powershell
+.venv\Scripts\python.exe ml\train_model.py
+```
+
+Model baru disimpan di `ml\artifacts\housing_model.joblib` dan hasil evaluasi disimpan di
+`ml\artifacts\model_metrics.json`. Restart backend setelah pelatihan agar model baru dimuat.
+Jika file `ml/villagedean_dataset.csv` tidak ditemukan, pelatihan menggunakan dataset sintetis
+`ml/housing_dataset.csv` yang dibuat otomatis.
 
 ## 3. Jalankan backend
 
-Di Command Prompt, jalankan:
+Buka dua terminal Command Prompt. Jalankan backend di terminal pertama:
 
 ```cmd
 cd backend
@@ -193,15 +219,16 @@ API tersedia di `http://localhost:8000`; dokumentasi interaktif ada di `http://l
 
 ## 4. Jalankan frontend
 
-Buka terminal baru dari root proyek:
+Di terminal kedua, jalankan frontend dari folder `backend`:
 
-```powershell
-cd frontend
-npm.cmd install
-npm.cmd run dev
+```cmd
+cd backend
+npm run dev
 ```
 
-Buka URL yang ditampilkan Vite (default `http://localhost:5173`). Untuk pemeriksaan TypeScript dan production build, jalankan `npm run build`.
+Script `dev` meneruskan perintah ke frontend. Dependency frontend dipasang satu kali dari folder `frontend` dengan `npm install`. Buka URL yang ditampilkan Vite (default `http://localhost:5173`). Untuk pemeriksaan TypeScript dan production build, jalankan `npm --prefix ..\frontend run build` dari folder `backend`.
+
+Jika menggunakan PowerShell, panggil pembungkus secara eksplisit: `.\uvicorn.cmd main:app --reload` untuk backend dan `npm.cmd run dev` untuk frontend. `npm` tanpa akhiran `.cmd` dapat diblokir oleh Execution Policy PowerShell.
 
 ## Endpoint utama
 

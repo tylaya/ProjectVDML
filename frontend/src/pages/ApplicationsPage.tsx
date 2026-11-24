@@ -6,9 +6,11 @@ import type { Application, ApplicationDecision } from '../types';
 type DecisionStatus = ApplicationDecision['status'];
 const decisions: DecisionStatus[] = ['Disetujui', 'Perlu revisi', 'Ditolak'];
 
-export function ApplicationsPage({ applications, onDecide, busy }: {
+export function ApplicationsPage({ applications, onAnalyze, onDecide, onDownloadDocument, busy }: {
   applications: Application[];
+  onAnalyze: (id: number) => Promise<Application>;
   onDecide: (id: number, decision: ApplicationDecision) => Promise<void>;
+  onDownloadDocument: (id: number, documentType: 'ktp' | 'kartu_keluarga') => Promise<void>;
   busy: boolean;
 }) {
   const [filter, setFilter] = useState('Semua');
@@ -23,6 +25,15 @@ export function ApplicationsPage({ applications, onDecide, busy }: {
     setNote(application.admin_note);
     setError('');
   };
+  const analyze = async () => {
+    if (!selected) return;
+    setError('');
+    try {
+      setSelected(await onAnalyze(selected.id));
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : 'Analisis ML gagal.');
+    }
+  };
   const submit = async (event: FormEvent) => {
     event.preventDefault();
     if (!selected) return;
@@ -32,6 +43,15 @@ export function ApplicationsPage({ applications, onDecide, busy }: {
       setSelected(null);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : 'Keputusan gagal disimpan.');
+    }
+  };
+  const downloadDocument = async (documentType: 'ktp' | 'kartu_keluarga') => {
+    if (!selected) return;
+    setError('');
+    try {
+      await onDownloadDocument(selected.id, documentType);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : 'Unduhan dokumen gagal.');
     }
   };
 
@@ -46,6 +66,20 @@ export function ApplicationsPage({ applications, onDecide, busy }: {
       <div className="flex flex-wrap items-center justify-between gap-3 border-b p-4"><div className="flex items-center gap-2 font-semibold text-royal"><ClipboardList size={18} />Daftar pengajuan</div><select value={filter} onChange={event => setFilter(event.target.value)} className="rounded-lg border bg-white px-3 py-2 text-sm"><option>Semua</option><option>Menunggu verifikasi</option><option>Perlu revisi</option><option>Disetujui</option><option>Ditolak</option></select></div>
       <div className="overflow-x-auto"><table className="w-full text-left text-sm"><thead className="bg-slate-50 text-xs text-slate-500"><tr>{['Mahasiswa (email kampus)', 'Pengajuan', 'Kategori', 'Hunian', 'Semester', 'Status', 'Diterima', 'Aksi'].map(title => <th key={title} className="whitespace-nowrap px-4 py-3">{title}</th>)}</tr></thead><tbody className="divide-y">{filtered.map(application => <tr key={application.id}><td className="whitespace-nowrap px-4 py-3 font-medium">{application.student_email}</td><td className="px-4 py-3">{application.request_type}</td><td className="px-4 py-3">{application.category}</td><td className="px-4 py-3">{application.residence_type}</td><td className="whitespace-nowrap px-4 py-3">{application.semester}</td><td className="whitespace-nowrap px-4 py-3"><span className="rounded-full bg-slate-100 px-2.5 py-1 text-xs">{application.status}</span></td><td className="whitespace-nowrap px-4 py-3 text-xs">{new Date(application.created_at).toLocaleString('id-ID')}</td><td className="px-4 py-3"><button onClick={() => openDecision(application)} aria-label={`Tinjau pengajuan ${application.id}`} className="rounded-lg border p-2 text-royal hover:bg-slate-50"><Eye size={16} /></button></td></tr>)}{!filtered.length && <tr><td colSpan={8} className="p-10 text-center text-sm text-slate-400">Belum ada data pada filter ini.</td></tr>}</tbody></table></div>
     </section>
-    {selected && <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/50 p-4"><form onSubmit={submit} className="w-full max-w-lg space-y-4 rounded-2xl bg-white p-6 shadow-xl"><div className="flex items-start justify-between"><div><h3 className="font-bold text-royal">Tinjau pengajuan VD-{String(selected.id).padStart(5, '0')}</h3><p className="mt-1 text-xs text-slate-500">{selected.student_email}</p></div><button type="button" onClick={() => setSelected(null)} aria-label="Tutup"><X size={19} /></button></div><div className="grid grid-cols-2 gap-3 rounded-lg bg-slate-50 p-3 text-sm"><p><span className="block text-xs text-slate-500">Kategori</span>{selected.category}</p><p><span className="block text-xs text-slate-500">Hunian</span>{selected.residence_type}</p><p><span className="block text-xs text-slate-500">Jenis</span>{selected.request_type}</p><p><span className="block text-xs text-slate-500">Semester</span>{selected.semester}</p></div><label className="block text-sm font-medium">Keputusan<select value={status} onChange={event => setStatus(event.target.value as DecisionStatus)} className="mt-1 w-full rounded-lg border bg-white px-3 py-2.5">{decisions.map(decision => <option key={decision}>{decision}</option>)}</select></label><label className="block text-sm font-medium">Catatan wajib<textarea required minLength={3} maxLength={500} value={note} onChange={event => setNote(event.target.value)} rows={3} className="mt-1 w-full rounded-lg border px-3 py-2" placeholder="Jelaskan hasil pemeriksaan atau perbaikan yang diperlukan." /></label>{error && <p role="alert" className="rounded-lg bg-rose-50 p-3 text-sm text-rose-700">{error}</p>}<div className="flex justify-end gap-2 border-t pt-4"><button type="button" onClick={() => setSelected(null)} className="rounded-lg border px-4 py-2 text-sm">Batal</button><button disabled={busy} className="rounded-lg bg-royal px-4 py-2 text-sm font-semibold text-white disabled:opacity-50">{busy ? 'Menyimpan…' : 'Simpan keputusan'}</button></div></form></div>}
+    {selected && <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/50 p-4"><form onSubmit={submit} className="w-full max-w-lg space-y-4 rounded-2xl bg-white p-6 shadow-xl"><div className="flex items-start justify-between"><div><h3 className="font-bold text-royal">Tinjau pengajuan VD-{String(selected.id).padStart(5, '0')}</h3><p className="mt-1 text-xs text-slate-500">{selected.student_email}</p></div><button type="button" onClick={() => setSelected(null)} aria-label="Tutup"><X size={19} /></button></div><div className="grid grid-cols-2 gap-3 rounded-lg bg-slate-50 p-3 text-sm"><p><span className="block text-xs text-slate-500">Kategori</span>{selected.category}</p><p><span className="block text-xs text-slate-500">Hunian</span>{selected.residence_type}</p><p><span className="block text-xs text-slate-500">Jenis</span>{selected.request_type}</p><p><span className="block text-xs text-slate-500">Semester</span>{selected.semester}</p></div>
+    {selected.documents.length > 0 && <div className="rounded-lg border p-3"><p className="mb-2 text-sm font-semibold">Dokumen pendukung</p><div className="flex flex-wrap gap-2">{selected.documents.map(documentType => <button key={documentType} type="button" onClick={() => void downloadDocument(documentType)} disabled={busy} className="rounded-lg border px-3 py-2 text-xs font-medium text-royal hover:bg-slate-50 disabled:opacity-50">{documentType === 'ktp' ? 'Unduh KTP' : 'Unduh Kartu Keluarga'}</button>)}</div></div>}
+    <div className="rounded-lg border bg-slate-50 p-3 text-sm">
+      <div className="flex items-center justify-between gap-3">
+        <div>
+          <p className="font-semibold text-royal">Analisis kelayakan ML</p>
+          {selected.ml_status ? <p className="mt-1 text-xs">{selected.ml_status}</p> : <p className="mt-1 text-xs text-slate-500">Belum dianalisis.</p>}
+          {selected.ml_prediction && <p className="mt-1 text-xs text-slate-600">Prediksi: {selected.ml_prediction} · confidence {(selected.ml_confidence * 100).toFixed(1)}%</p>}
+        </div>
+        <button type="button" onClick={() => void analyze()} disabled={busy} className="rounded-lg border border-royal px-3 py-2 text-xs font-semibold text-royal disabled:opacity-50">
+          {busy ? 'Menganalisis…' : 'Analisis ML'}
+        </button>
+      </div>
+    </div>
+    <label className="block text-sm font-medium">Keputusan<select value={status} onChange={event => setStatus(event.target.value as DecisionStatus)} className="mt-1 w-full rounded-lg border bg-white px-3 py-2.5">{decisions.map(decision => <option key={decision}>{decision}</option>)}</select></label><label className="block text-sm font-medium">Catatan wajib<textarea required minLength={3} maxLength={500} value={note} onChange={event => setNote(event.target.value)} rows={3} className="mt-1 w-full rounded-lg border px-3 py-2" placeholder="Jelaskan hasil pemeriksaan atau perbaikan yang diperlukan." /></label>{error && <p role="alert" className="rounded-lg bg-rose-50 p-3 text-sm text-rose-700">{error}</p>}    <div className="flex justify-end gap-2 border-t pt-4"><button type="button" onClick={() => setSelected(null)} className="rounded-lg border px-4 py-2 text-sm">Batal</button><button disabled={busy || (status === 'Disetujui' && selected.ml_eligible !== 1)} className="rounded-lg bg-royal px-4 py-2 text-sm font-semibold text-white disabled:opacity-50">{busy ? 'Menyimpan…' : 'Simpan keputusan'}</button></div></form></div>}
   </div>;
 }

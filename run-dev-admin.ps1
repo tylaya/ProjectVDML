@@ -116,15 +116,14 @@ $BackendCommand = @"
 Set-Location '$ProjectRoot'
 . '.\.venv\Scripts\Activate.ps1'
 Set-Location '$BackendDir'
-$env:ADMIN_EMAILS = 'your.admin@unklab.ac.id'
-uvicorn main:app --reload --host 0.0.0.0 --port $BackendPort
+Remove-Item Env:GOOGLE_CLIENT_ID, Env:SESSION_SECRET, Env:ADMIN_EMAILS, Env:ADMIN_PASSWORD_HASH, Env:COOKIE_SECURE, Env:COOKIE_SAMESITE, Env:FRONTEND_URL, Env:FRONTEND_ORIGINS -ErrorAction SilentlyContinue
+uvicorn main:app --reload --host 127.0.0.1 --port $BackendPort
 "@
 
 $FrontendCommand = @"
 Set-Location '$FrontendDir'
-$env:VITE_API_URL = 'http://localhost:$BackendPort'
-$env:VITE_GOOGLE_CLIENT_ID = 'replace-with-google-oauth-web-client-id'
-npm run dev -- --host 0.0.0.0 --port $FrontendPort
+Remove-Item Env:VITE_API_URL, Env:VITE_GOOGLE_CLIENT_ID -ErrorAction SilentlyContinue
+npm run dev -- --host localhost --port $FrontendPort
 "@
 
 Start-WindowedCommand -Title "Backend API (Admin)" -WorkingDirectory $ProjectRoot -Command $BackendCommand

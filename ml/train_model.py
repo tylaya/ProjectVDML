@@ -22,17 +22,21 @@ NUMERIC_FEATURES = ["jarak_km", "waktu_tempuh_menit"]
 CATEGORICAL_FEATURES = ["kelurahan", "akses_jalan"]
 FEATURES = NUMERIC_FEATURES + CATEGORICAL_FEATURES
 LABELS = ["Outsider Dekat", "Outsider Jauh"]
+VILLAGE_DEAN_OUTPUT = ROOT / "villagedean_dataset.csv"
 
 
-def evaluate_model(model, x_train, x_test, y_train, y_test):
+def evaluate_model(model, x_train, x_test, y_train, y_test, numeric_features, categorical_features):
     pipeline = Pipeline(
         [
             (
                 "preprocessor",
                 ColumnTransformer(
                     [
-                        ("numeric", StandardScaler(), NUMERIC_FEATURES),
-                        ("categorical", OneHotEncoder(handle_unknown="ignore"), CATEGORICAL_FEATURES),
+                        ("numeric", StandardScaler(), numeric_features),
+                        *(
+                            [("categorical", OneHotEncoder(handle_unknown="ignore"), categorical_features)]
+                            if categorical_features else []
+                        ),
                     ]
                 ),
             ),
@@ -53,14 +57,38 @@ def evaluate_model(model, x_train, x_test, y_train, y_test):
 
 
 def train():
-    if not OUTPUT.exists():
-        save_dataset(generate_dataset())
-    dataset = pd.read_csv(OUTPUT)
-    missing = set(FEATURES + ["kategori"]) - set(dataset.columns)
-    if missing:
-        raise ValueError(f"Kolom dataset tidak lengkap: {', '.join(sorted(missing))}")
+    if VILLAGE_DEAN_OUTPUT.exists():
+        village_data = pd.read_csv(VILLAGE_DEAN_OUTPUT)
+        missing = {"kategori_outsider", "jarak_km"} - set(village_data.columns)
+        if missing:
+            raise ValueError(
+                f"Kolom dataset Village Dean tidak lengkap: {', '.join(sorted(missing))}"
+            )
+        dataset = village_data[["jarak_km"]].copy()
+        dataset["kategori"] = dataset["jarak_km"].apply(
+            lambda distance: "Outsider Jauh" if float(distance) > 2.0 else "Outsider Dekat"
+        )
+        active_features = ["jarak_km"]
+        numeric_features = ["jarak_km"]
+        categorical_features = []
+    else:
+        if not OUTPUT.exists():
+            save_dataset(generate_dataset())
+        dataset = pd.read_csv(OUTPUT)
+        missing = set(FEATURES + ["kategori"]) - set(dataset.columns)
+        if missing:
+            raise ValueError(f"Kolom dataset tidak lengkap: {', '.join(sorted(missing))}")
+        active_features = FEATURES
+        numeric_features = NUMERIC_FEATURES
+        categorical_features = CATEGORICAL_FEATURES
+
+    if len(dataset) < 20:
+        raise ValueError("Dataset pelatihan minimal harus berisi 20 baris.")
+    class_counts = dataset["kategori"].value_counts()
+    if set(class_counts.index) != set(LABELS) or any(count < 2 for count in class_counts):
+        raise ValueError("Dataset harus memiliki minimal 2 baris untuk setiap kategori.")
     x_train, x_test, y_train, y_test = train_test_split(
-        dataset[FEATURES],
+        dataset[active_features],
         dataset["kategori"],
         test_size=0.25,
         random_state=42,
@@ -75,7 +103,15 @@ def train():
     evaluated = {}
     pipelines = {}
     for name, estimator in models.items():
-        pipelines[name], evaluated[name] = evaluate_model(estimator, x_train, x_test, y_train, y_test)
+        pipelines[name], evaluated[name] = evaluate_model(
+            estimator,
+            x_train,
+            x_test,
+            y_train,
+            y_test,
+            numeric_features,
+            categorical_features,
+        )
         print(f"{name}: accuracy={evaluated[name]['accuracy']:.3f}, F1={evaluated[name]['f1_score']:.3f}")
 
     best_name = max(evaluated, key=lambda name: evaluated[name]["f1_score"])
@@ -83,7 +119,7 @@ def train():
     dump(pipelines[best_name], MODEL_PATH)
     summary = {
         "model_name": best_name,
-        "features": FEATURES,
+        "features": active_features,
         "target": "kategori",
         "dataset_rows": int(len(dataset)),
         "train_rows": int(len(x_train)),

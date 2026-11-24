@@ -1,3 +1,4 @@
+import re
 from datetime import date
 from typing import Literal
 
@@ -34,11 +35,44 @@ class GoogleCredential(BaseModel):
         return value.strip().lower()
 
 
+class PasswordLogin(BaseModel):
+    email: str = Field(min_length=3, max_length=254)
+    password: str = Field(min_length=1, max_length=128)
+
+    @field_validator("email")
+    @classmethod
+    def normalize_email(cls, value: str) -> str:
+        return value.strip().lower()
+
+
+class StudentRegistration(BaseModel):
+    credential: str = Field(default="", max_length=10000)
+    email: str = Field(min_length=3, max_length=254)
+    password: str = Field(min_length=8, max_length=128)
+
+    @field_validator("email")
+    @classmethod
+    def normalize_student_email(cls, value: str) -> str:
+        normalized = value.strip().lower()
+        if not re.fullmatch(r"s\d{8}@student\.unklab\.ac\.id", normalized):
+            raise ValueError(
+                "Email mahasiswa harus berformat s12345678@student.unklab.ac.id."
+            )
+        return normalized
+
+
 class ApplicationCreate(BaseModel):
     request_type: RequestType
     category: Category
     residence_type: ResidenceType
     semester: str = Field(min_length=3, max_length=40)
+    nama_mahasiswa: str = Field(min_length=1, max_length=120)
+    nama_kost: str = Field(min_length=1, max_length=120)
+    alamat_kost: str = Field(min_length=1, max_length=240)
+    kelurahan: str = Field(min_length=1, max_length=80)
+    jarak_km: float = Field(ge=0, le=100)
+    waktu_tempuh_menit: int = Field(ge=1, le=1440)
+    akses_jalan: RoadAccess
 
     @field_validator("semester")
     @classmethod

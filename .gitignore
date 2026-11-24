@@ -6,6 +6,7 @@ dist/
 backend/housing.db
 backend/housing.db-shm
 backend/housing.db-wal
+backend/private_documents/
 *.egg-info/
 .env
 .DS_Store

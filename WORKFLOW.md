@@ -8,7 +8,8 @@ tinggal di luar kampus adalah keputusan administratif manusia, bukan target otom
 
 ## Alur layanan yang dituju
 
-1. **Pra-pendaftaran mahasiswa** — mahasiswa masuk dengan Google Workspace kampus, memilih
+1. **Pra-pendaftaran mahasiswa** — mahasiswa membuat akun dengan email Google Workspace berformat
+   `s` + 8 angka di `student.unklab.ac.id`, memverifikasinya melalui Google, lalu memilih
    pendaftaran baru/perpanjangan, kategori outsider, dan tipe hunian.
 2. **Pemeriksaan kelengkapan** — sistem memeriksa field dan dokumen wajib; berkas sensitif
    hanya diproses setelah penyimpanan aman, retensi, serta akses kontrol disiapkan.
@@ -52,8 +53,8 @@ tinggal di luar kampus adalah keputusan administratif manusia, bukan target otom
 ## Status terhadap implementasi saat ini
 
 - Tersedia: staff dashboard untuk kategori hunian, data/riwayat pemeriksaan, pengaturan ambang
-  jarak, autentikasi Google berbasis allowlist peran, portal submit/status pengajuan dasar, dan
-  audit log sederhana.
+  jarak, autentikasi Google dan password dengan allowlist admin, pendaftaran akun mahasiswa
+  terverifikasi Google, portal submit/status pengajuan dasar, dan audit log sederhana.
 - Demo sintetis pada menu **Modul Antrean ML**: M1 regresi durasi dengan pembanding median; M2
   moving-average beban per hari/jam dari empat minggu sintetis dengan validasi minggu kelima;
   M3 logistic regression no-show;

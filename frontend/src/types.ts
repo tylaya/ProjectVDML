@@ -17,13 +17,29 @@ export interface Application {
   category: Category;
   residence_type: 'Keluarga' | 'Wali' | 'Kost putra' | 'Kost putri';
   semester: string;
+  nama_mahasiswa: string;
+  nama_kost: string;
+  alamat_kost: string;
+  kelurahan: string;
+  jarak_km: number;
+  waktu_tempuh_menit: number;
+  akses_jalan: RoadAccess;
+  ml_prediction: '' | Category;
+  ml_confidence: number;
+  ml_status: string;
+  ml_eligible: number;
   status: 'Menunggu verifikasi' | 'Perlu revisi' | 'Disetujui' | 'Ditolak';
   admin_note: string;
+  documents: ('ktp' | 'kartu_keluarga')[];
   created_at: string;
   updated_at: string;
 }
 
-export type ApplicationInput = Pick<Application, 'request_type' | 'category' | 'residence_type' | 'semester'>;
+export type ApplicationInput = Pick<
+  Application,
+  'request_type' | 'category' | 'residence_type' | 'semester' | 'nama_mahasiswa' |
+  'nama_kost' | 'alamat_kost' | 'kelurahan' | 'jarak_km' | 'waktu_tempuh_menit' | 'akses_jalan'
+>;
 export type ApplicationDecision = Pick<Application, 'status' | 'admin_note'>;
 
 export interface Student {

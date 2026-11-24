@@ -3,8 +3,18 @@ import unittest
 from unittest.mock import patch
 
 from fastapi import HTTPException
+from starlette.requests import Request
+from starlette.responses import Response
 
-from auth import verify_google_credential
+from auth import (
+    clear_session_cookie,
+    current_user,
+    hash_password,
+    is_student_email,
+    set_session_cookie,
+    verify_google_credential,
+    verify_password,
+)
 from schemas import GoogleCredential, StudentCreate
 
 
@@ -68,7 +78,7 @@ class VerifyGoogleCredentialTests(unittest.TestCase):
 
         self.assertEqual(error.exception.status_code, 403)
 
-    def test_student_cannot_request_admin_role(self):
+    def test_student_role_requires_student_number_email_format(self):
         with patch(
             "auth.id_token.verify_oauth2_token",
             return_value={
@@ -79,7 +89,36 @@ class VerifyGoogleCredentialTests(unittest.TestCase):
         ):
             with self.assertRaises(HTTPException) as error:
                 verify_google_credential(
-                    "google-token", "student@student.unklab.ac.id", "admin"
+                    "google-token", "student@student.unklab.ac.id", "student"
+                )
+
+        self.assertEqual(error.exception.status_code, 403)
+
+    def test_student_login_email_requires_eight_digit_id(self):
+        self.assertTrue(is_student_email("s22210609@student.unklab.ac.id"))
+        self.assertFalse(is_student_email("student@student.unklab.ac.id"))
+        self.assertFalse(is_student_email("s123@student.unklab.ac.id"))
+        self.assertFalse(is_student_email("s22210609@gmail.com"))
+
+    def test_password_hash_verifies_only_the_original_password(self):
+        encoded = hash_password("student-test-password")
+
+        self.assertTrue(verify_password("student-test-password", encoded))
+        self.assertFalse(verify_password("different-password", encoded))
+        self.assertFalse(verify_password("student-test-password", "not-a-hash"))
+
+    def test_student_cannot_request_admin_role(self):
+        with patch(
+            "auth.id_token.verify_oauth2_token",
+            return_value={
+                "email": "s22210609@student.unklab.ac.id",
+                "email_verified": True,
+                "name": "Student",
+            },
+        ):
+            with self.assertRaises(HTTPException) as error:
+                verify_google_credential(
+                    "google-token", "s22210609@student.unklab.ac.id", "admin"
                 )
 
         self.assertEqual(error.exception.status_code, 403)
@@ -106,6 +145,93 @@ class VerifyGoogleCredentialTests(unittest.TestCase):
 
         self.assertEqual(student.nama_kost, "Rumah pribadi/keluarga")
         self.assertEqual(student.alamat_kost, "Area rumah (tanpa alamat rinci)")
+
+
+class SessionCookieTests(unittest.TestCase):
+    @staticmethod
+    def request(host: str, cookie: str = "") -> Request:
+        headers = [(b"host", f"{host}:8000".encode())]
+        if cookie:
+            headers.append((b"cookie", cookie.encode()))
+        return Request(
+            {
+                "type": "http",
+                "http_version": "1.1",
+                "method": "POST",
+                "scheme": "http",
+                "path": "/api/auth/google",
+                "raw_path": b"/api/auth/google",
+                "query_string": b"",
+                "headers": headers,
+                "server": (host, 8000),
+                "client": ("127.0.0.1", 1234),
+            }
+        )
+
+    def test_local_session_cookie_round_trips_as_httponly_lax_cookie(self):
+        user = {
+            "email": "admin@example.com",
+            "name": "Admin",
+            "role": "admin",
+        }
+        with patch.dict(
+            os.environ,
+            {
+                "SESSION_SECRET": "s" * 48,
+                "COOKIE_SECURE": "false",
+                "COOKIE_SAMESITE": "lax",
+            },
+            clear=True,
+        ):
+            response = Response()
+            set_session_cookie(response, user, self.request("localhost"))
+            cookie_header = response.headers["set-cookie"]
+            cookie = cookie_header.split(";", 1)[0]
+
+            self.assertIn("httponly", cookie_header.lower())
+            self.assertIn("samesite=lax", cookie_header.lower())
+            self.assertNotIn("secure", cookie_header.lower())
+            self.assertEqual(
+                current_user(self.request("localhost", cookie)),
+                user,
+            )
+
+    def test_insecure_cookie_is_rejected_for_non_localhost(self):
+        with patch.dict(
+            os.environ,
+            {
+                "SESSION_SECRET": "s" * 48,
+                "COOKIE_SECURE": "false",
+                "COOKIE_SAMESITE": "lax",
+            },
+            clear=True,
+        ):
+            with self.assertRaises(HTTPException) as error:
+                set_session_cookie(
+                    Response(),
+                    {"email": "admin@example.com", "name": "Admin", "role": "admin"},
+                    self.request("example.com"),
+                )
+
+        self.assertEqual(error.exception.status_code, 503)
+
+    def test_cookie_deletion_uses_matching_local_policy(self):
+        with patch.dict(
+            os.environ,
+            {
+                "SESSION_SECRET": "s" * 48,
+                "COOKIE_SECURE": "false",
+                "COOKIE_SAMESITE": "lax",
+            },
+            clear=True,
+        ):
+            response = Response()
+            clear_session_cookie(response, self.request("127.0.0.1"))
+
+        cookie_header = response.headers["set-cookie"].lower()
+        self.assertIn("samesite=lax", cookie_header)
+        self.assertIn("max-age=0", cookie_header)
+        self.assertNotIn("secure", cookie_header)
 
 
 if __name__ == "__main__":

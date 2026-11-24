@@ -82,14 +82,25 @@ export default function App() {
     finally { setBusy(false); }
   };
   const saveSettings = async (value: Settings) => run(async () => { setSettings(await api.saveSettings(value)); });
-  const submitApplication = async (value: ApplicationInput) => run(async () => {
-    await api.submitApplication(value);
+  const submitApplication = async (value: ApplicationInput, ktp: File | null, kartuKeluarga: File | null) => run(async () => {
+    await api.submitApplication(value, ktp, kartuKeluarga);
     await refreshApplications();
   });
   const decideApplication = async (id: number, decision: ApplicationDecision) => run(async () => {
     await api.decideApplication(id, decision);
     await refreshApplications();
   });
+  const downloadApplicationDocument = async (id: number, documentType: 'ktp' | 'kartu_keluarga') => run(async () => {
+    await api.downloadApplicationDocument(id, documentType);
+  });
+  const analyzeApplication = async (id: number): Promise<Application> => {
+    let updated!: Application;
+    await run(async () => {
+      updated = await api.analyzeApplication(id);
+      await refreshApplications();
+    });
+    return updated;
+  };
   const createStudent = async (item: Omit<Student, 'id'> & { id: string }) => run(async () => { await api.createStudent(item); await refreshStudents(); await refreshDashboard(); });
   const updateStudent = async (id: string, item: Omit<Student, 'id'>) => run(async () => { await api.updateStudent(id, item); await refreshStudents(); await refreshDashboard(); });
   const deleteStudent = async (id: string) => run(async () => { await api.deleteStudent(id); await refreshStudents(); await refreshDashboard(); });
@@ -104,11 +115,23 @@ export default function App() {
     await run(async () => { result = await api.queueDemo(input); });
     return result;
   };
-  const login = async (credential: string, email: string, requestedRole: LoginRole) => {
-    const profile = await api.login(credential, email, requestedRole);
+  const establishSession = async () => {
+    const profile = await api.me();
     setError('');
     setUser(profile);
     setPage(profile.role === 'admin' ? 'dashboard' : 'applications');
+  };
+  const login = async (credential: string, email: string, requestedRole: LoginRole) => {
+    await api.login(credential, email, requestedRole);
+    await establishSession();
+  };
+  const passwordLogin = async (email: string, password: string) => {
+    await api.passwordLogin(email, password);
+    await establishSession();
+  };
+  const registerStudent = async (credential: string, email: string, password: string) => {
+    await api.registerStudent(credential, email, password);
+    await establishSession();
   };
   const logout = async () => {
     try {
@@ -120,14 +143,22 @@ export default function App() {
   };
   if (!authChecked || loading) return <div className="flex min-h-screen items-center justify-center text-sm text-slate-500">Memeriksa sesi Village Dean…</div>;
   if (error && !user) return <div className="mx-auto mt-20 max-w-lg rounded-2xl border bg-white p-8 text-center"><h1 className="text-xl font-bold text-royal">Layanan belum tersedia</h1><p role="alert" className="my-4 text-sm text-rose-700">{error}</p><button onClick={() => window.location.reload()} className="rounded-lg bg-royal px-4 py-2 text-sm text-white">Coba lagi</button></div>;
-  if (!user) return <LoginPage onLogin={login} />;
+  if (!user) {
+    return (
+      <LoginPage
+        onPasswordLogin={passwordLogin}
+        onGoogleLogin={login}
+        onRegister={registerStudent}
+      />
+    );
+  }
   if (user.role === 'student') return <StudentPortalPage user={user} applications={applications} onSubmit={submitApplication} onLogout={() => void logout()} busy={busy} error={error} />;
   if (error && !dashboard) return <div className="mx-auto mt-20 max-w-lg rounded-2xl border bg-white p-8 text-center"><h1 className="text-xl font-bold text-royal">Dashboard petugas belum tersedia</h1><p role="alert" className="my-4 text-sm text-rose-700">{error}</p><button onClick={() => void loadPageData()} className="rounded-lg bg-royal px-4 py-2 text-sm text-white">Coba lagi</button></div>;
   if (!dashboard || !model) return <div className="flex min-h-screen items-center justify-center text-sm text-slate-500">Memuat dashboard petugas…</div>;
   return <Layout page={page} onNavigate={setPage} settings={settings} pending={applications.filter(item => item.status === 'Menunggu verifikasi').length} onLogout={() => void logout()}>
     {error && <div role="alert" className="mb-5 flex items-center justify-between rounded-lg border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700"><span>{error}</span><button onClick={() => setError('')} aria-label="Tutup pesan">×</button></div>}
     {page === 'dashboard' && <DashboardPage data={dashboard} model={model} navigate={setPage} />}
-    {page === 'applications' && <ApplicationsPage applications={applications} onDecide={decideApplication} busy={busy} />}
+    {page === 'applications' && <ApplicationsPage applications={applications} onAnalyze={analyzeApplication} onDecide={decideApplication} onDownloadDocument={downloadApplicationDocument} busy={busy} />}
     {page === 'students' && <StudentsPage students={students} onCreate={createStudent} onUpdate={updateStudent} onDelete={deleteStudent} busy={busy} />}
     {page === 'inspection' && <InspectionPage students={students} onAnalyze={analyze} busy={busy} modelAvailable={model.status === 'ready'} modelMessage={model.message} />}
     {page === 'queueModules' && <QueueModulesPage onRun={runQueueDemo} busy={busy} />}
