@@ -1,13 +1,27 @@
 export type Category = 'Outsider Dekat' | 'Outsider Jauh';
 export type VerificationStatus = 'Sesuai Kategori' | 'Berpotensi Tidak Sesuai' | 'Perlu Verifikasi Petugas';
-export type Page = 'dashboard' | 'students' | 'inspection' | 'history' | 'settings' | 'applications' | 'queueModules';
+export type Page = 'dashboard' | 'students' | 'inspection' | 'history' | 'settings' | 'applications' | 'queueModules' | 'kosts';
 export type RoadAccess = 'Jalan Utama' | 'Lorong' | 'Perbukitan';
-export type LoginRole = 'student' | 'admin';
+export type LoginRole = 'student' | 'admin' | 'kost_owner';
 
 export interface AuthUser {
   email: string;
   name: string;
-  role: 'student' | 'admin';
+  role: 'student' | 'admin' | 'kost_owner';
+}
+
+export interface Kost {
+  id: number;
+  name: string;
+  address: string;
+  maps_url: string;
+  kelurahan: string;
+  residence_type: 'Kost putra' | 'Kost putri';
+  owner_email: string;
+  approval_status: 'Menunggu approval' | 'Disetujui' | 'Ditolak';
+  location_anomaly: boolean | 0 | 1;
+  created_at: string;
+  updated_at: string;
 }
 
 export interface Application {
@@ -16,10 +30,14 @@ export interface Application {
   request_type: 'Pendaftaran baru' | 'Perpanjangan';
   category: Category;
   residence_type: 'Keluarga' | 'Wali' | 'Kost putra' | 'Kost putri';
+  kost_id: number | null;
+  kost_confirmation_status: 'Tidak diperlukan' | 'Menunggu kost' | 'Dikonfirmasi' | 'Ditolak';
+  kost_confirmation_note: string;
   semester: string;
   nama_mahasiswa: string;
   nama_kost: string;
   alamat_kost: string;
+  maps_url: string;
   kelurahan: string;
   jarak_km: number;
   waktu_tempuh_menit: number;
@@ -30,7 +48,7 @@ export interface Application {
   ml_eligible: number;
   status: 'Menunggu verifikasi' | 'Perlu revisi' | 'Disetujui' | 'Ditolak';
   admin_note: string;
-  documents: ('ktp' | 'kartu_keluarga')[];
+  documents: ('ktp' | 'kartu_keluarga' | 'surat_penerimaan_kost' | 'surat_domisili')[];
   created_at: string;
   updated_at: string;
 }
@@ -38,7 +56,8 @@ export interface Application {
 export type ApplicationInput = Pick<
   Application,
   'request_type' | 'category' | 'residence_type' | 'semester' | 'nama_mahasiswa' |
-  'nama_kost' | 'alamat_kost' | 'kelurahan' | 'jarak_km' | 'waktu_tempuh_menit' | 'akses_jalan'
+  'nama_kost' | 'alamat_kost' | 'kelurahan' | 'jarak_km' | 'waktu_tempuh_menit' | 'akses_jalan' | 'kost_id'
+  | 'maps_url'
 >;
 export type ApplicationDecision = Pick<Application, 'status' | 'admin_note'>;
 
@@ -47,9 +66,11 @@ export interface Student {
   nama_mahasiswa: string;
   nama_kost: string;
   alamat_kost: string;
+  maps_url: string;
   kelurahan: string;
   jarak_km: number;
   kategori_terdaftar: Category;
+  location_anomaly: boolean;
 }
 
 export interface Inspection {
@@ -58,6 +79,7 @@ export interface Inspection {
   nama_mahasiswa: string;
   nama_kost: string;
   alamat_kost: string;
+  maps_url: string;
   kelurahan: string;
   jarak_km: number;
   waktu_tempuh_menit: number;
@@ -78,6 +100,18 @@ export interface Settings {
   distance_threshold_km: number;
   verification_zone_km: number;
   verification_zone_enabled: boolean;
+  semester_name: string;
+  semester_start_date: string | null;
+  campus_maps_url: string;
+}
+
+export interface RegistrationPeriod {
+  configured: boolean;
+  location_configured: boolean;
+  semester_name: string;
+  start_date: string | null;
+  end_date: string | null;
+  is_open: boolean;
 }
 
 export interface Dashboard {
@@ -104,6 +138,7 @@ export interface InspectionInput {
   nama_mahasiswa: string;
   nama_kost: string;
   alamat_kost: string;
+  maps_url: string;
   kelurahan: string;
   jarak_km: number;
   waktu_tempuh_menit: number;

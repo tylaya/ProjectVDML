@@ -2,7 +2,7 @@
 
 Prototype full-stack untuk pendaftaran dasar mahasiswa outsider dan verifikasi administratif kategori hunian Universitas Klabat. Aplikasi memiliki portal mahasiswa dan dashboard staf/admin. Data awal dan dataset ML bersifat sintetis; prediksi hanya rekomendasi petugas, bukan keputusan final.
 
-**Batas penting:** menu **Modul Antrean ML** menyediakan demo sintetis M1–M8 dan simulator FIFO/SPT/Q-learning offline, bukan antrean operasional. Slot, tiket, QR, check-in, notifikasi, dan model yang divalidasi dengan data historis belum tersedia. Model tidak membuktikan pengurangan waktu antrean. Jangan masukkan dokumen domisili, alamat lengkap, NIM, atau data pribadi nyata.
+**Batas penting:** menu **Modul Antrean ML** menyediakan demo sintetis M1–M8 dan simulator FIFO/SPT/Q-learning offline, bukan antrean operasional. Slot, tiket, QR, check-in, notifikasi, dan model yang divalidasi dengan data historis belum tersedia. Model tidak membuktikan pengurangan waktu antrean. Atur kebijakan retensi dan penghapusan dokumen sebelum memproses data pribadi nyata.
 
 Dokumen: [SRS](srs.md) · [Workflow Final Project ML](WORKFLOW.md) · [Custom agent pencatat perubahan](.github/agents/change-logger.agent.md)
 
@@ -90,16 +90,30 @@ Isi nilai berikut di file yang terbuka:
   - `SESSION_SECRET=...` (minimal 32 karakter)
   - `ADMIN_EMAILS=adminVD@unklab.ac.id`
   - `ADMIN_PASSWORD_HASH=...` (hash scrypt; jangan simpan password polos)
+  - `SMTP_HOST`, `SMTP_PORT`, `SMTP_USERNAME`, `SMTP_PASSWORD`, dan `SMTP_FROM` untuk mengirim email reset password. Untuk Gmail gunakan App Password, bukan password akun utama.
+  - `DOCUMENT_ENCRYPTION_KEY=...` untuk mengenkripsi dokumen yang diunggah; buat dengan `py -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`. Simpan dan cadangkan kunci secara aman—dokumen tidak dapat dibuka kembali jika kunci hilang.
   - `COOKIE_SECURE=false` dan `COOKIE_SAMESITE=lax` untuk localhost
   - `FRONTEND_URL=http://localhost:5173`
   - `FRONTEND_ORIGINS=http://localhost:5173,http://127.0.0.1:5173`
+  - `DOCUMENT_STORAGE_DIR` bersifat opsional; atur ke direktori privat di luar folder yang disajikan web jika ingin memindahkan penyimpanan dokumen terenkripsi.
 - `frontend\.env.local`
   - `VITE_API_URL=` (kosong; API lokal memakai proxy Vite same-origin)
   - `VITE_GOOGLE_CLIENT_ID=...`
+  - `VITE_CAMPUS_ORIGIN=...` (opsional, hanya untuk tautan rute manual; default mengarah ke Universitas Klabat)
 
-Mahasiswa dapat membuat akun tanpa verifikasi Google menggunakan email berformat `s` + 8 angka, misalnya `s22210609@student.unklab.ac.id`, dan password minimal 8 karakter. Login password mahasiswa yang belum memiliki akun akan membuat akun baru secara otomatis dengan password yang dimasukkan. Email di luar format mahasiswa ditolak. Admin menggunakan email yang tercantum di `ADMIN_EMAILS` dan password yang hash-nya disimpan di `ADMIN_PASSWORD_HASH`. Login Google tetap tersedia untuk admin/staf.
+Mahasiswa membuat akun dengan memverifikasi Google memakai email `8 angka@student.unklab.ac.id` (misalnya `12410292@student.unklab.ac.id`) atau format lama `s` + 8 angka, lalu dapat login dengan Google atau password. Login Google tersedia untuk mahasiswa, staf/admin, dan pemilik kost yang terdaftar. Tautan lupa password berlaku satu jam dan memerlukan konfigurasi SMTP. Admin menggunakan email yang tercantum di `ADMIN_EMAILS`; pemilik kost hanya dapat masuk memakai email Google yang terdaftar pada kost yang disetujui.
+
+Pada halaman login, staf/admin dapat memilih peran **Mahasiswa** untuk membuka portal mahasiswa. Pilihan ini berlaku untuk Google maupun password admin; password admin tetap diverifikasi dan sesi yang dibuat hanya memiliki peran mahasiswa. Pilihan otomatis mempertahankan peran bawaan untuk login password, sedangkan pemilik kost wajib menggunakan Google.
+
+Staf menambahkan kost, email pemilik, dan tautan lokasi melalui menu **Data dan Approval Kost**, lalu menyetujui listing kampus. Hanya listing yang disetujui muncul di formulir mahasiswa. Mahasiswa yang memilih kost harus mengunggah bukti pendaftaran di kost; pemilik masuk dengan Google dan mengonfirmasi status penghuni. Mahasiswa yang tinggal di rumah keluarga/wali wajib mengunggah surat domisili RT/RW atau pemerintah setempat, KTP, dan Kartu Keluarga; Outsider Jauh juga wajib mengunggah KTP dan Kartu Keluarga. Keputusan pengajuan tetap dilakukan staf kampus.
 
 Pada form data mahasiswa dan pemeriksaan, nama hunian serta alamat/area domisili memiliki saran dropdown dari data yang sudah tersimpan. Pilih opsi rumah bila tinggal di rumah, atau ketik pilihan lain. Gunakan area domisili umum, bukan alamat lengkap atau data pribadi nyata.
+
+Di **Pengaturan Sistem**, admin wajib mengisi nama semester, tanggal awal semester, dan tautan lengkap Google Maps kampus. Pengajuan baru hanya dapat dikirim selama lima hari kalender pertama sejak tanggal awal tersebut (WITA). Di luar periode itu, petugas masih dapat memperbarui data yang sudah masuk melalui **Data Mahasiswa**.
+
+Mahasiswa yang tinggal di rumah mengisi tautan Google Maps hunian; mahasiswa kost memakai lokasi dari listing kost yang disetujui. Staf wajib mengisi tautan lokasi ketika menambah/memperbarui data mahasiswa dan listing kost. Sistem membaca koordinat dari tautan lengkap (`@latitude,longitude`, `!3dlatitude!4dlongitude`, atau `q=latitude,longitude`), menghitung jarak garis lurus secara lokal, lalu memeriksa apakah titik berada di batas Sulawesi Utara. Tautan pendek `maps.app.goo.gl` tidak didukung; gunakan tautan penuh yang memuat koordinat. Sistem tidak memakai Google Maps API, tidak mengirim alamat ke layanan geocoding, dan tidak menghitung jarak berkendara. Lokasi di luar provinsi ditandai sebagai anomali untuk tinjauan staf; listing kost dengan anomali lokasi tidak dapat disetujui atau dipilih mahasiswa sampai lokasinya diperbaiki. Model ML dan kelengkapan dokumen memberi rekomendasi saja; keputusan akhir tetap pada petugas.
+
+Geofence Sulawesi Utara menggunakan geometri provinsi dari [geoBoundaries](https://www.geoboundaries.org/), data ADM1 Indonesia dengan shape ID `65028918B26897900130576`, berlisensi CC BY 4.0/ODbL dan disertai atribusi di `backend/north_sulawesi_boundary.json`.
 
 Setelah itu jalankan backend di terminal baru:
 
@@ -149,14 +163,15 @@ Jika model gagal dilatih atau dimuat, backend tetap dapat melayani dashboard, da
 
 ### Demo modul antrean (M1–M8)
 
-Setelah login sebagai staf/admin, buka **Modul Antrean ML** dari menu. Pilih tanggal Senin
-sebagai awal periode, lalu jalankan simulasi satu minggu. Default demo mengasumsikan layanan
-Senin–Jumat pukul 08.00–17.00, dua loket ilustratif, dan 80 pendaftar sintetis per hari. Hari/jam
-dan periode satu minggu pada awal semester (sebelum pembayaran uang kuliah dan kontrak mata
-kuliah) berasal dari informasi awal pengguna; volume dan jumlah loket hanyalah asumsi sementara.
+Setelah login sebagai staf/admin, buka **Simulasi Layanan Awal Semester** dari menu. Pilih tanggal
+Senin sebagai awal simulasi lima hari layanan. Simulasi ini dijalankan untuk satu periode awal
+semester saja dan tidak mewakili analisis mingguan berulang. Default demo mengasumsikan layanan
+Senin–Jumat pukul 08.00–17.00, dua loket ilustratif, dan 80 pendaftar sintetis per hari. Pendaftaran
+online nyata dibuka hanya selama lima hari kalender pertama sejak tanggal awal semester yang
+dikonfigurasi admin; pembaruan data mahasiswa yang telah terdaftar tetap dapat dilakukan petugas.
 
-Hasil mencakup M1 prediksi durasi vs baseline median, M2 perkiraan beban dari empat minggu sintetis
-(divalidasi dengan MAE pada minggu sintetis kelima), M3 estimasi no-show,
+Hasil mencakup M1 prediksi durasi vs baseline median, M2 perkiraan beban dari empat periode
+sintetis lima hari (divalidasi dengan MAE pada periode sintetis kelima), M3 estimasi no-show,
 M4 triase aturan sementara, M5 checklist tanpa unggah, M6 segmen layanan, M7 anomaly flags, serta
 M8 perbandingan FIFO/SPT/Q-learning. Seed dapat dipakai untuk mengulang skenario yang sama.
 Simulasi berjalan offline pada data buatan dan tidak membuat slot/tiket atau mengubah pengajuan
@@ -175,11 +190,19 @@ serta data resmi dikonfirmasi.
    - `ADMIN_PASSWORD_HASH`: buat hash scrypt dari folder `backend` dengan
      `py -c "from getpass import getpass; from auth import hash_password; print(hash_password(getpass()))"`
      lalu simpan hasilnya, bukan password polos.
+   - Atur `SMTP_HOST`, `SMTP_PORT`, `SMTP_USERNAME`, `SMTP_PASSWORD`, dan `SMTP_FROM`
+     agar email reset password dapat dikirim. Gmail memerlukan App Password.
+   - `DOCUMENT_ENCRYPTION_KEY`: buat dari root project dengan
+     `.\.venv\Scripts\python.exe -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`.
+     Kunci ini wajib untuk unggah dokumen; simpan cadangan rahasia yang aman dan gunakan kunci yang sama saat aplikasi dijalankan kembali.
 3. Salin `frontend\.env.example` menjadi `frontend\.env.local`, lalu isi
-   `VITE_GOOGLE_CLIENT_ID` dengan Client ID yang sama.
-4. Email pendaftaran mahasiswa harus berformat `s` + 8 angka +
-   `@student.unklab.ac.id` dan diverifikasi dengan akun Google yang sama. Admin hanya dapat
-   masuk dengan alamat di `ADMIN_EMAILS` dan password yang cocok dengan `ADMIN_PASSWORD_HASH`.
+   `VITE_GOOGLE_CLIENT_ID` dengan Client ID yang sama dan sesuaikan
+   `VITE_CAMPUS_ORIGIN` bila lokasi asal rute berbeda. Integrasi tautan Google Maps tidak
+   membutuhkan API key atau billing Routes API.
+4. Email mahasiswa harus berformat 8 angka, dengan atau tanpa awalan `s`, di domain
+   `@student.unklab.ac.id`; akun dibuat setelah verifikasi Google. Pemilik kost masuk memakai
+   Google dengan email yang didaftarkan pada kost berstatus Disetujui. Admin hanya dapat masuk
+   dengan alamat di `ADMIN_EMAILS` dan password yang cocok dengan `ADMIN_PASSWORD_HASH`.
 5. Untuk produksi gunakan HTTPS, set `COOKIE_SECURE=true`, batasi `FRONTEND_ORIGINS`, dan
    lengkapi enkripsi/retensi/backup serta review privasi sebelum memproses data nyata. Ganti
    password admin demo dengan password unik yang kuat sebelum deployment.
@@ -232,8 +255,9 @@ Jika menggunakan PowerShell, panggil pembungkus secara eksplisit: `.\uvicorn.cmd
 
 ## Endpoint utama
 
-- `GET /api/health`; `POST /api/auth/google`, `GET /api/auth/me`, `POST /api/auth/logout`
-- `GET /api/applications/me` and `POST /api/applications` (mahasiswa); `GET/PATCH /api/applications` (staf/admin)
+- `GET /api/health`; `POST /api/auth/google`, `GET /api/auth/me`, `POST /api/auth/logout`, `POST /api/auth/password-reset/request`, `POST /api/auth/password-reset`
+- `GET/POST /api/kosts`, `PATCH /api/kosts/{id}/approval`; `GET /api/kosts/approved` (mahasiswa); `GET /api/owner/applications`, `PATCH /api/owner/applications/{id}/confirmation`
+- `GET /api/applications/me` and `POST /api/applications/with-documents` (mahasiswa); `GET/PATCH /api/applications` (staf/admin)
 - `GET /api/dashboard`, `GET/POST/PUT/DELETE /api/students`
 - `POST /api/inspections/analyze`, `GET /api/inspections?search=...&status=...`
 - `GET/PUT /api/settings`, `GET /api/ml/info`

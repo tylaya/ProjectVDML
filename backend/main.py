@@ -1,12 +1,16 @@
 import json
+import hashlib
 import logging
 import os
+import secrets
+import smtplib
 import sqlite3
 import subprocess
 import sys
+from email.message import EmailMessage
 from io import BytesIO
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import joblib
@@ -25,6 +29,7 @@ from auth import (
     is_student_email,
     is_valid_password_hash,
     require_admin,
+    require_kost_owner,
     require_student,
     set_session_cookie,
     verify_google_credential,
@@ -38,12 +43,23 @@ from document_storage import (
     store_document,
     validate_document,
 )
+from location_analysis import (
+    haversine_km,
+    is_in_north_sulawesi,
+    parse_google_maps_coordinates,
+)
 from schemas import (
     ApplicationCreate,
     ApplicationDecision,
     GoogleCredential,
     InspectionInput,
     InspectionResult,
+    KostApproval,
+    KostCreate,
+    KostConfirmation,
+    KostLocationUpdate,
+    PasswordReset,
+    PasswordResetRequest,
     PasswordLogin,
     QueueSimulationRequest,
     Settings,
@@ -71,17 +87,12 @@ model_features = FEATURES
 logger = logging.getLogger(__name__)
 
 
-def model_accuracy() -> float:
-    if not isinstance(model_metrics, dict):
-        return 0.0
-    metrics = model_metrics.get("metrics")
-    if not isinstance(metrics, dict):
-        return 0.0
-    return max(0.0, min(1.0, float(metrics.get("accuracy", 0.0))))
-
-
-def classify_distance(distance: float) -> str:
-    return "Outsider Jauh" if float(distance) > 2.0 else "Outsider Dekat"
+def predict_category(sample: pd.DataFrame) -> tuple[str, float]:
+    if model is None:
+        raise RuntimeError("Model ML belum siap.")
+    probabilities = model.predict_proba(sample)[0]
+    predicted = str(model.predict(sample)[0])
+    return predicted, float(max(probabilities))
 
 
 def load_model():
@@ -160,15 +171,16 @@ def as_dict(row):
 def record_login(user: dict[str, str], action: str = "login") -> None:
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
     with get_connection() as connection:
-        connection.execute(
-            """INSERT INTO users (email, display_name, role, created_at, last_login_at)
-            VALUES (?, ?, ?, ?, ?)
-            ON CONFLICT(email) DO UPDATE SET
-                display_name=excluded.display_name,
-                role=excluded.role,
-                last_login_at=excluded.last_login_at""",
-            (user["email"], user["name"], user["role"], now, now),
-        )
+        if user["role"] != "kost_owner":
+            connection.execute(
+                """INSERT INTO users (email, display_name, role, created_at, last_login_at)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(email) DO UPDATE SET
+                    display_name=excluded.display_name,
+                    role=excluded.role,
+                    last_login_at=excluded.last_login_at""",
+                (user["email"], user["name"], user["role"], now, now),
+            )
         connection.execute(
             "INSERT INTO audit_logs (actor_email, action, object_type, object_id, occurred_at) "
             "VALUES (?, ?, 'user', ?, ?)",
@@ -204,6 +216,12 @@ def login_with_password(
     }
 
     if email in allowed_admins:
+        requested_role = payload.requested_role or "admin"
+        if requested_role == "kost_owner":
+            raise HTTPException(
+                status_code=403,
+                detail="Pemilik kost harus masuk menggunakan Google.",
+            )
         admin_password_hash = os.environ.get("ADMIN_PASSWORD_HASH", "").strip()
         if not admin_password_hash or not is_valid_password_hash(admin_password_hash):
             raise HTTPException(
@@ -212,13 +230,23 @@ def login_with_password(
             )
         if not verify_password(payload.password, admin_password_hash):
             raise HTTPException(status_code=401, detail="Email atau password tidak valid.")
-        user = {"email": email, "name": "Admin Village Dean", "role": "admin"}
+        user = {"email": email, "name": "Admin Village Dean", "role": requested_role}
         record_login(user)
     else:
+        if payload.requested_role == "admin":
+            raise HTTPException(
+                status_code=403,
+                detail="Email ini tidak terdaftar sebagai staf/admin.",
+            )
+        if payload.requested_role == "kost_owner":
+            raise HTTPException(
+                status_code=403,
+                detail="Pemilik kost harus masuk menggunakan Google.",
+            )
         if not is_student_email(email):
             raise HTTPException(
                 status_code=403,
-                detail="Gunakan email mahasiswa berformat s12345678@student.unklab.ac.id.",
+                detail="Gunakan email mahasiswa berformat 12410292 atau s12410292@student.unklab.ac.id.",
             )
         with get_connection() as connection:
             row = connection.execute(
@@ -227,20 +255,10 @@ def login_with_password(
             ).fetchone()
             now = datetime.now(timezone.utc).isoformat(timespec="seconds")
             if row is None:
-                password_hash = hash_password(payload.password)
-                display_name = "Mahasiswa " + email.split("@", 1)[0].upper()
-                connection.execute(
-                    """INSERT INTO users (
-                        email, display_name, role, created_at, last_login_at, password_hash
-                    ) VALUES (?, ?, 'student', ?, ?, ?)""",
-                    (email, display_name, now, now, password_hash),
+                raise HTTPException(
+                    status_code=401,
+                    detail="Akun belum terdaftar. Buat akun terlebih dahulu dengan Google.",
                 )
-                connection.execute(
-                    "INSERT INTO audit_logs (actor_email, action, object_type, object_id, occurred_at) "
-                    "VALUES (?, 'account_registered', 'user', ?, ?)",
-                    (email, email, now),
-                )
-                user = {"email": email, "name": display_name, "role": "student"}
             else:
                 if (
                     row["role"] != "student"
@@ -269,6 +287,7 @@ def register_student(
 ):
     ensure_session_configuration()
     email = payload.email
+    verified_user = verify_google_credential(payload.credential, email, "student")
     allowed_admins = {
         item.strip().lower()
         for item in os.environ.get("ADMIN_EMAILS", "").split(",")
@@ -299,7 +318,7 @@ def register_student(
                 update = connection.execute(
                     """UPDATE users SET display_name = ?, password_hash = ?, last_login_at = ?
                     WHERE email = ? AND role = 'student' AND password_hash IS NULL""",
-                    ("Mahasiswa " + email.split("@", 1)[0].upper(), password_hash, now, email),
+                    (verified_user["name"], password_hash, now, email),
                 )
                 if update.rowcount != 1:
                     raise HTTPException(
@@ -311,7 +330,7 @@ def register_student(
                     """INSERT INTO users (
                         email, display_name, role, created_at, last_login_at, password_hash
                     ) VALUES (?, ?, 'student', ?, ?, ?)""",
-                    (email, "Mahasiswa " + email.split("@", 1)[0].upper(), now, now, password_hash),
+                    (email, verified_user["name"], now, now, password_hash),
                 )
             connection.execute(
                 "INSERT INTO audit_logs (actor_email, action, object_type, object_id, occurred_at) "
@@ -328,11 +347,114 @@ def register_student(
 
     user = {
         "email": email,
-        "name": "Mahasiswa " + email.split("@", 1)[0].upper(),
+        "name": verified_user["name"],
         "role": "student",
     }
     set_session_cookie(response, user, request)
     return user
+
+
+def send_password_reset_email(email: str, token: str) -> None:
+    host = os.environ.get("SMTP_HOST", "").strip()
+    sender = os.environ.get("SMTP_FROM", "").strip()
+    if not host or not sender:
+        raise HTTPException(
+            status_code=503,
+            detail="Reset password belum dikonfigurasi. Atur SMTP_HOST dan SMTP_FROM di backend.",
+        )
+    try:
+        port = int(os.environ.get("SMTP_PORT", "587"))
+        message = EmailMessage()
+        message["Subject"] = "Atur ulang password SIGAP-VD"
+        message["From"] = sender
+        message["To"] = email
+        reset_url = (
+            os.environ.get("FRONTEND_URL", "http://localhost:5173").rstrip("/")
+            + "/?reset_token="
+            + token
+        )
+        message.set_content(
+            "Gunakan tautan berikut untuk mengatur ulang password Anda. "
+            "Tautan berlaku selama satu jam dan hanya dapat digunakan sekali:\n\n"
+            f"{reset_url}\n\nJika Anda tidak meminta reset, abaikan email ini."
+        )
+        with smtplib.SMTP(host, port, timeout=15) as smtp:
+            if os.environ.get("SMTP_STARTTLS", "true").strip().lower() == "true":
+                smtp.starttls()
+            username = os.environ.get("SMTP_USERNAME", "").strip()
+            if username:
+                smtp.login(username, os.environ.get("SMTP_PASSWORD", ""))
+            smtp.send_message(message)
+    except (OSError, ValueError, smtplib.SMTPException) as error:
+        logger.exception("Email reset password gagal dikirim.")
+        raise HTTPException(
+            status_code=503,
+            detail="Email reset password gagal dikirim. Periksa konfigurasi SMTP.",
+        ) from error
+
+
+@app.post("/api/auth/password-reset/request")
+def request_password_reset(payload: PasswordResetRequest):
+    if not is_student_email(payload.email):
+        raise HTTPException(
+            status_code=422,
+            detail="Reset password hanya tersedia untuk email mahasiswa terdaftar.",
+        )
+    with get_connection() as connection:
+        account = connection.execute(
+            "SELECT email FROM users WHERE email = ? AND role = 'student'",
+            (payload.email,),
+        ).fetchone()
+        if account is None:
+            return {"message": "Jika akun terdaftar, tautan reset akan dikirim ke email."}
+        token = secrets.token_urlsafe(32)
+        expires_at = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat(
+            timespec="seconds"
+        )
+        connection.execute(
+            """INSERT INTO password_reset_tokens (email, token_hash, expires_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(email) DO UPDATE SET
+                token_hash = excluded.token_hash, expires_at = excluded.expires_at""",
+            (
+                payload.email,
+                hashlib.sha256(token.encode("utf-8")).hexdigest(),
+                expires_at,
+            ),
+        )
+    send_password_reset_email(payload.email, token)
+    return {"message": "Jika akun terdaftar, tautan reset akan dikirim ke email."}
+
+
+@app.post("/api/auth/password-reset")
+def reset_password(payload: PasswordReset):
+    token_hash = hashlib.sha256(payload.token.encode("utf-8")).hexdigest()
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    with get_connection() as connection:
+        token_record = connection.execute(
+            """SELECT email FROM password_reset_tokens
+               WHERE token_hash = ? AND expires_at > ?""",
+            (token_hash, now),
+        ).fetchone()
+        if token_record is None:
+            raise HTTPException(
+                status_code=400,
+                detail="Tautan reset tidak valid atau telah kedaluwarsa.",
+            )
+        connection.execute(
+            "UPDATE users SET password_hash = ? WHERE email = ? AND role = 'student'",
+            (hash_password(payload.password), token_record["email"]),
+        )
+        connection.execute(
+            "DELETE FROM password_reset_tokens WHERE email = ?",
+            (token_record["email"],),
+        )
+        connection.execute(
+            """INSERT INTO audit_logs (actor_email, action, object_type, object_id, occurred_at)
+               VALUES (?, 'password_reset', 'user', ?, ?)""",
+            (token_record["email"], token_record["email"], now),
+        )
+    return {"message": "Password berhasil diperbarui. Silakan masuk."}
 
 
 @app.get("/api/auth/me")
@@ -344,6 +466,199 @@ def read_current_user(user: dict = Depends(current_user)):
 def logout(request: Request, response: Response, user: dict = Depends(current_user)):
     clear_session_cookie(response, request)
     return {"message": f"Sesi {user['email']} telah berakhir."}
+
+
+@app.get("/api/kosts/approved")
+def list_approved_kosts(_user: dict = Depends(require_student)):
+    with get_connection() as connection:
+        rows = connection.execute(
+            """SELECT id, name, address, kelurahan, residence_type, maps_url
+               FROM kosts
+               WHERE approval_status = 'Disetujui' AND location_anomaly = 0
+                 AND maps_url != ''
+               ORDER BY name"""
+        ).fetchall()
+    return [as_dict(row) for row in rows]
+
+
+@app.get("/api/kosts")
+def list_kosts(_user: dict = Depends(require_admin)):
+    with get_connection() as connection:
+        rows = connection.execute("SELECT * FROM kosts ORDER BY id DESC").fetchall()
+    return [as_dict(row) for row in rows]
+
+
+@app.post("/api/kosts", status_code=201)
+def create_kost(payload: KostCreate, user: dict = Depends(require_admin)):
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    latitude, longitude = parse_google_maps_coordinates(payload.maps_url)
+    location_anomaly = not is_in_north_sulawesi(latitude, longitude)
+    try:
+        with get_connection() as connection:
+            cursor = connection.execute(
+                """INSERT INTO kosts (
+                    name, address, kelurahan, residence_type, owner_email,
+                    approval_status, created_at, updated_at, maps_url, location_anomaly
+                ) VALUES (?, ?, ?, ?, ?, 'Menunggu approval', ?, ?, ?, ?)""",
+                (
+                    payload.name,
+                    payload.address,
+                    payload.kelurahan,
+                    payload.residence_type,
+                    payload.owner_email,
+                    now,
+                    now,
+                    payload.maps_url,
+                    location_anomaly,
+                ),
+            )
+            kost = connection.execute(
+                "SELECT * FROM kosts WHERE id = ?", (cursor.lastrowid,)
+            ).fetchone()
+            connection.execute(
+                """INSERT INTO audit_logs (actor_email, action, object_type, object_id, occurred_at)
+                   VALUES (?, 'kost_submitted_for_approval', 'kost', ?, ?)""",
+                (user["email"], str(cursor.lastrowid), now),
+            )
+    except sqlite3.IntegrityError as error:
+        if "UNIQUE constraint failed: kosts.name, kosts.address" in str(error):
+            raise HTTPException(
+                status_code=409, detail="Kost dengan nama dan alamat tersebut sudah terdaftar."
+            ) from error
+        raise
+    return as_dict(kost)
+
+
+@app.patch("/api/kosts/{kost_id}/location")
+def update_kost_location(
+    kost_id: int,
+    payload: KostLocationUpdate,
+    user: dict = Depends(require_admin),
+):
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    with get_connection() as connection:
+        cursor = connection.execute(
+            """UPDATE kosts SET maps_url = ?, location_anomaly = ?,
+               approval_status = 'Menunggu approval', updated_at = ? WHERE id = ?""",
+            (
+                payload.maps_url,
+                not is_in_north_sulawesi(
+                    *parse_google_maps_coordinates(payload.maps_url)
+                ),
+                now,
+                kost_id,
+            ),
+        )
+        if cursor.rowcount == 0:
+            raise HTTPException(status_code=404, detail="Data kost tidak ditemukan.")
+        connection.execute(
+            """INSERT INTO audit_logs (actor_email, action, object_type, object_id, occurred_at)
+               VALUES (?, 'kost_location_updated', 'kost', ?, ?)""",
+            (user["email"], str(kost_id), now),
+        )
+        row = connection.execute("SELECT * FROM kosts WHERE id = ?", (kost_id,)).fetchone()
+    return as_dict(row)
+
+
+@app.patch("/api/kosts/{kost_id}/approval")
+def decide_kost(
+    kost_id: int,
+    payload: KostApproval,
+    user: dict = Depends(require_admin),
+):
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    with get_connection() as connection:
+        kost = connection.execute(
+            "SELECT location_anomaly, maps_url FROM kosts WHERE id = ?", (kost_id,)
+        ).fetchone()
+        if kost is None:
+            raise HTTPException(status_code=404, detail="Data kost tidak ditemukan.")
+        if payload.approval_status == "Disetujui" and kost["location_anomaly"]:
+            raise HTTPException(
+                status_code=409,
+                detail="Kost di luar Sulawesi Utara ditandai sebagai anomali dan tidak dapat disetujui.",
+            )
+        if payload.approval_status == "Disetujui" and not kost["maps_url"]:
+            raise HTTPException(
+                status_code=409,
+                detail="Tautan lokasi Google Maps harus diisi sebelum kost dapat disetujui.",
+            )
+        cursor = connection.execute(
+            "UPDATE kosts SET approval_status = ?, updated_at = ? WHERE id = ?",
+            (payload.approval_status, now, kost_id),
+        )
+        if cursor.rowcount == 0:
+            raise HTTPException(status_code=404, detail="Data kost tidak ditemukan.")
+        connection.execute(
+            """INSERT INTO audit_logs (actor_email, action, object_type, object_id, occurred_at)
+               VALUES (?, ?, 'kost', ?, ?)""",
+            (
+                user["email"],
+                f"kost_{payload.approval_status.lower()}",
+                str(kost_id),
+                now,
+            ),
+        )
+        row = connection.execute("SELECT * FROM kosts WHERE id = ?", (kost_id,)).fetchone()
+    return as_dict(row)
+
+
+@app.get("/api/owner/applications")
+def owner_applications(user: dict = Depends(require_kost_owner)):
+    with get_connection() as connection:
+        rows = connection.execute(
+            """SELECT applications.* FROM applications
+               JOIN kosts ON kosts.id = applications.kost_id
+               WHERE kosts.owner_email = ? AND kosts.approval_status = 'Disetujui'
+                 AND kosts.location_anomaly = 0 AND kosts.maps_url != ''
+               ORDER BY applications.id DESC""",
+            (user["email"],),
+        ).fetchall()
+    return [application_record(row) for row in rows]
+
+
+@app.patch("/api/owner/applications/{application_id}/confirmation")
+def confirm_kost_occupant(
+    application_id: int,
+    payload: KostConfirmation,
+    user: dict = Depends(require_kost_owner),
+):
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    with get_connection() as connection:
+        application = connection.execute(
+            """SELECT applications.id FROM applications
+               JOIN kosts ON kosts.id = applications.kost_id
+               WHERE applications.id = ? AND kosts.owner_email = ?
+                 AND kosts.approval_status = 'Disetujui'
+                 AND kosts.location_anomaly = 0 AND kosts.maps_url != ''
+                 AND applications.residence_type = kosts.residence_type""",
+            (application_id, user["email"]),
+        ).fetchone()
+        if application is None:
+            raise HTTPException(status_code=404, detail="Pengajuan kost tidak ditemukan.")
+        connection.execute(
+            """UPDATE applications SET kost_confirmation_status = ?,
+               kost_confirmation_note = ?, updated_at = ? WHERE id = ?""",
+            (payload.status, payload.note.strip(), now, application_id),
+        )
+        connection.execute(
+            """INSERT INTO audit_logs (actor_email, action, object_type, object_id, occurred_at)
+               VALUES (?, ?, 'application', ?, ?)""",
+            (
+                user["email"],
+                f"kost_occupancy_{payload.status.lower()}",
+                str(application_id),
+                now,
+            ),
+        )
+        row = connection.execute(
+            """SELECT applications.*,
+                (SELECT group_concat(document_type, ',') FROM application_documents
+                 WHERE application_id = applications.id) AS document_types
+                FROM applications WHERE id = ?""",
+            (application_id,),
+        ).fetchone()
+    return application_record(row)
 
 
 @app.get("/api/applications/me")
@@ -370,24 +685,177 @@ def application_record(row):
     return record
 
 
+def registration_period(settings: dict, today: date | None = None):
+    semester_name = settings["semester_name"]
+    start_date = settings["semester_start_date"]
+    if not semester_name or not start_date:
+        return {
+            "configured": False,
+            "location_configured": bool(settings.get("campus_maps_url")),
+            "semester_name": semester_name,
+            "start_date": None,
+            "end_date": None,
+            "is_open": False,
+        }
+
+    start = date.fromisoformat(start_date)
+    end = start + timedelta(days=4)
+    current_date = today or datetime.now(timezone(timedelta(hours=8))).date()
+    return {
+        "configured": True,
+        "location_configured": bool(settings.get("campus_maps_url")),
+        "semester_name": semester_name,
+        "start_date": start.isoformat(),
+        "end_date": end.isoformat(),
+        "is_open": start <= current_date <= end,
+    }
+
+
+def location_assessment(maps_url: str, campus_maps_url: str):
+    if not maps_url:
+        raise HTTPException(
+            status_code=422,
+            detail="Tautan lokasi Google Maps wajib diisi.",
+        )
+    if not campus_maps_url:
+        raise HTTPException(
+            status_code=503,
+            detail="Lokasi kampus belum dikonfigurasi admin Village Dean.",
+        )
+    try:
+        latitude, longitude = parse_google_maps_coordinates(maps_url)
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    try:
+        campus_coordinates = parse_google_maps_coordinates(campus_maps_url)
+    except ValueError as error:
+        raise HTTPException(
+            status_code=503,
+            detail="Tautan lokasi kampus tidak valid. Periksa Pengaturan Sistem.",
+        ) from error
+    return {
+        "latitude": latitude,
+        "longitude": longitude,
+        "jarak_km": haversine_km(campus_coordinates, (latitude, longitude)),
+        "inside_north_sulawesi": is_in_north_sulawesi(latitude, longitude),
+    }
+
+
+def recommend_application(
+    application: dict,
+    location: dict,
+    document_types: set[str],
+    settings: dict,
+):
+    if model is None:
+        return "", 0.0, "Model ML belum siap; perlu tinjauan manual.", 0
+
+    sample = pd.DataFrame(
+        [
+            {
+                "jarak_km": float(application["jarak_km"]),
+                "waktu_tempuh_menit": int(application["waktu_tempuh_menit"]),
+                "kelurahan": application["kelurahan"],
+                "akses_jalan": application["akses_jalan"],
+            }
+        ],
+        columns=model_features,
+    )
+    predicted, confidence = predict_category(sample)
+    required_documents = {"surat_penerimaan_kost" if application["residence_type"] in {"Kost putra", "Kost putri"} else "surat_domisili"}
+    if (
+        application["category"] == "Outsider Jauh"
+        or application["residence_type"] in {"Keluarga", "Wali"}
+    ):
+        required_documents.update({"ktp", "kartu_keluarga"})
+    documents_complete = required_documents.issubset(document_types)
+
+    if not location["inside_north_sulawesi"]:
+        status = "Anomali lokasi: di luar Sulawesi Utara; perlu ditinjau petugas."
+    elif not documents_complete:
+        status = "Dokumen belum lengkap; perlu ditinjau petugas."
+    elif predicted != application["category"]:
+        status = f"Prediksi {predicted} berbeda dari kategori yang dipilih; perlu ditinjau petugas."
+    elif confidence < settings["confidence_threshold"]:
+        status = "Confidence model di bawah ambang; perlu ditinjau petugas."
+    elif predicted == "Outsider Jauh":
+        status = "Dokumen lengkap dan lokasi sesuai; rekomendasi Outsider Jauh untuk dipertimbangkan petugas."
+    else:
+        status = "Rekomendasi Outsider Dekat; perlu ditinjau sesuai kebijakan Village Dean."
+
+    eligible = int(
+        location["inside_north_sulawesi"]
+        and documents_complete
+        and predicted == application["category"] == "Outsider Jauh"
+        and confidence >= settings["confidence_threshold"]
+    )
+    return predicted, confidence, status, eligible
+
+
+def resolve_application_residence(connection, payload: ApplicationCreate) -> ApplicationCreate:
+    kost_types = {"Kost putra", "Kost putri"}
+    if payload.residence_type in kost_types:
+        if payload.kost_id is None:
+            raise HTTPException(
+                status_code=422,
+                detail="Pilih kost yang telah disetujui kampus.",
+            )
+        kost = connection.execute(
+            """SELECT id, name, address, kelurahan, residence_type, maps_url
+               FROM kosts
+               WHERE id = ? AND approval_status = 'Disetujui'
+                 AND location_anomaly = 0 AND maps_url != ''""",
+            (payload.kost_id,),
+        ).fetchone()
+        if kost is None:
+            raise HTTPException(
+                status_code=422,
+                detail="Kost tidak ditemukan atau belum disetujui kampus.",
+            )
+        if kost["residence_type"] != payload.residence_type:
+            raise HTTPException(
+                status_code=422,
+                detail="Jenis kost tidak sesuai dengan pilihan mahasiswa.",
+            )
+        return payload.model_copy(
+            update={
+                "nama_kost": kost["name"],
+                "alamat_kost": kost["address"],
+                "kelurahan": kost["kelurahan"],
+                "maps_url": kost["maps_url"],
+            }
+        )
+    if payload.kost_id is not None:
+        raise HTTPException(
+            status_code=422,
+            detail="Hunian rumah tidak dapat menggunakan ID kost.",
+        )
+    return payload
+
+
 def insert_application(connection, payload: ApplicationCreate, user: dict, now: str):
+    is_kost = payload.residence_type in {"Kost putra", "Kost putri"}
     cursor = connection.execute(
         """INSERT INTO applications (
-            student_email, request_type, category, residence_type, semester,
-            nama_mahasiswa, nama_kost, alamat_kost, kelurahan, jarak_km,
+            student_email, request_type, category, residence_type, kost_id,
+            kost_confirmation_status, semester,
+            nama_mahasiswa, nama_kost, alamat_kost, maps_url, kelurahan, jarak_km,
             waktu_tempuh_menit, akses_jalan, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             user["email"],
             payload.request_type,
             payload.category,
             payload.residence_type,
+            payload.kost_id,
+            "Menunggu kost" if is_kost else "Tidak diperlukan",
             payload.semester.strip(),
             payload.nama_mahasiswa.strip(),
             payload.nama_kost.strip(),
             payload.alamat_kost.strip(),
+            payload.maps_url or "",
             payload.kelurahan.strip(),
-            payload.jarak_km,
+            payload.jarak_km if payload.jarak_km is not None else 0,
             payload.waktu_tempuh_menit,
             payload.akses_jalan,
             now,
@@ -403,28 +871,18 @@ def insert_application(connection, payload: ApplicationCreate, user: dict, now: 
 
 
 @app.post("/api/applications", status_code=201)
-def create_application(payload: ApplicationCreate, user: dict = Depends(require_student)):
-    if payload.category == "Outsider Jauh":
-        raise HTTPException(
-            status_code=422,
-            detail="Pengajuan Outsider Jauh wajib menyertakan KTP dan Kartu Keluarga.",
-        )
-    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
-    with get_connection() as connection:
-        application_id = insert_application(connection, payload, user, now)
-        row = connection.execute(
-            """SELECT applications.*, NULL AS document_types
-               FROM applications WHERE id = ?""",
-            (application_id,),
-        ).fetchone()
-    return application_record(row)
+def create_application(_user: dict = Depends(require_student)):
+    raise HTTPException(
+        status_code=422,
+        detail="Pengajuan wajib menyertakan surat bukti hunian. Gunakan formulir dengan unggahan dokumen.",
+    )
 
 
 async def read_upload(document_type: str, upload: UploadFile | None):
     if upload is None:
         raise HTTPException(
             status_code=422,
-            detail=f"Berkas {DOCUMENT_TYPES[document_type]} wajib diunggah untuk Outsider Jauh.",
+            detail=f"Berkas {DOCUMENT_TYPES[document_type]} wajib diunggah.",
         )
     data = await upload.read(MAX_DOCUMENT_SIZE + 1)
     if len(data) > MAX_DOCUMENT_SIZE:
@@ -444,6 +902,8 @@ async def create_application_with_documents(
     payload: str = Form(...),
     ktp: UploadFile | None = File(default=None),
     kartu_keluarga: UploadFile | None = File(default=None),
+    surat_penerimaan_kost: UploadFile | None = File(default=None),
+    surat_domisili: UploadFile | None = File(default=None),
     user: dict = Depends(require_student),
 ):
     try:
@@ -454,19 +914,63 @@ async def create_application_with_documents(
             detail=json.loads(error.json()),
         ) from error
 
-    documents = {}
-    if application_payload.category == "Outsider Jauh":
-        for document_type, upload in (
-            ("ktp", ktp),
-            ("kartu_keluarga", kartu_keluarga),
-        ):
-            data, content_type = await read_upload(document_type, upload)
-            documents[document_type] = (data, content_type)
+    settings = get_settings()
+    period = registration_period(settings)
+    if not period["is_open"]:
+        if period["configured"]:
+            detail = (
+                f"Pendaftaran {period['semester_name']} hanya dibuka "
+                f"{period['start_date']} sampai {period['end_date']}."
+            )
+        else:
+            detail = "Jadwal semester belum dikonfigurasi oleh admin Village Dean."
+        raise HTTPException(status_code=403, detail=detail)
+
+    with get_connection() as connection:
+        application_payload = resolve_application_residence(connection, application_payload)
+    location = location_assessment(
+        application_payload.maps_url or "", settings["campus_maps_url"]
+    )
+    application_payload = application_payload.model_copy(
+        update={"jarak_km": location["jarak_km"]}
+    )
+
+    residence_document = (
+        "surat_penerimaan_kost"
+        if application_payload.residence_type in {"Kost putra", "Kost putri"}
+        else "surat_domisili"
+    )
+    expected_uploads = {
+        residence_document: (
+            surat_penerimaan_kost if residence_document == "surat_penerimaan_kost" else surat_domisili
+        )
+    }
+    requires_identity_documents = (
+        application_payload.category == "Outsider Jauh"
+        or application_payload.residence_type in {"Keluarga", "Wali"}
+    )
+    if requires_identity_documents:
+        expected_uploads.update({"ktp": ktp, "kartu_keluarga": kartu_keluarga})
     elif ktp is not None or kartu_keluarga is not None:
         raise HTTPException(
             status_code=422,
-            detail="Berkas KTP dan Kartu Keluarga hanya diminta untuk Outsider Jauh.",
+            detail="Berkas KTP dan Kartu Keluarga tidak diperlukan untuk Outsider Dekat yang tinggal di kost.",
         )
+    if (
+        application_payload.residence_type in {"Kost putra", "Kost putri"}
+        and surat_domisili is not None
+    ) or (
+        application_payload.residence_type in {"Keluarga", "Wali"}
+        and surat_penerimaan_kost is not None
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail="Unggah hanya dokumen hunian yang sesuai dengan tipe tempat tinggal.",
+        )
+    documents = {}
+    for document_type, upload in expected_uploads.items():
+        data, content_type = await read_upload(document_type, upload)
+        documents[document_type] = (data, content_type)
 
     stored_documents = []
     try:
@@ -496,6 +1000,27 @@ async def create_application_with_documents(
                         now,
                     ),
                 )
+            application_row = connection.execute(
+                "SELECT * FROM applications WHERE id = ?", (application_id,)
+            ).fetchone()
+            prediction, confidence, ml_status, eligible = recommend_application(
+                as_dict(application_row),
+                location,
+                set(documents),
+                settings,
+            )
+            connection.execute(
+                """UPDATE applications SET ml_prediction = ?, ml_confidence = ?,
+                   ml_status = ?, ml_eligible = ?, updated_at = ? WHERE id = ?""",
+                (
+                    prediction,
+                    confidence,
+                    ml_status,
+                    eligible,
+                    now,
+                    application_id,
+                ),
+            )
             row = connection.execute(
                 """SELECT applications.*, ? AS document_types
                    FROM applications WHERE id = ?""",
@@ -532,7 +1057,10 @@ def list_applications(
     if status in valid_statuses:
         query += " WHERE status = ?"
         parameters = (status,)
-    query += " ORDER BY CASE status WHEN 'Menunggu verifikasi' THEN 0 ELSE 1 END, id DESC"
+    query += (
+        " ORDER BY CASE status WHEN 'Menunggu verifikasi' THEN 0 ELSE 1 END, "
+        "CASE WHEN ml_eligible = 1 THEN 0 ELSE 1 END, id DESC"
+    )
     with get_connection() as connection:
         rows = connection.execute(query, parameters).fetchall()
     return [application_record(row) for row in rows]
@@ -584,6 +1112,7 @@ def analyze_application(
 ):
     if model is None:
         raise HTTPException(status_code=503, detail=model_error or "Model ML belum siap.")
+    settings = get_settings()
     with get_connection() as connection:
         row = connection.execute(
             "SELECT * FROM applications WHERE id = ?", (application_id,)
@@ -591,43 +1120,53 @@ def analyze_application(
         if row is None:
             raise HTTPException(status_code=404, detail="Pengajuan tidak ditemukan.")
         application = as_dict(row)
-        if not application["nama_mahasiswa"] or not application["jarak_km"]:
+        if not application["nama_mahasiswa"] or application["jarak_km"] is None:
             raise HTTPException(
                 status_code=422,
                 detail="Pengajuan lama belum memiliki data hunian dan jarak untuk dianalisis.",
             )
-        inspection_values = {
-            "jarak_km": float(application["jarak_km"]),
-            "waktu_tempuh_menit": int(application["waktu_tempuh_menit"]),
-            "kelurahan": application["kelurahan"],
-            "akses_jalan": application["akses_jalan"],
-        }
-        sample = pd.DataFrame(
-            [{name: inspection_values.get(name) for name in model_features}],
-            columns=model_features,
+        location = location_assessment(
+            application["maps_url"], settings["campus_maps_url"]
         )
-        probabilities = model.predict_proba(sample)[0]
-        distance = float(application["jarak_km"])
-        predicted = classify_distance(distance)
-        confidence = model_accuracy()
-        if predicted == "Outsider Jauh":
-            ml_status = "Layak sebagai Outsider Jauh"
-            eligible = 1
-        else:
-            ml_status = "Tidak layak sebagai Outsider Jauh"
-            eligible = 0
+        application["jarak_km"] = location["jarak_km"]
+        document_rows = connection.execute(
+            "SELECT document_type FROM application_documents WHERE application_id = ?",
+            (application_id,),
+        ).fetchall()
+        prediction, confidence, ml_status, eligible = recommend_application(
+            application,
+            location,
+            {document["document_type"] for document in document_rows},
+            settings,
+        )
+        if not prediction:
+            raise HTTPException(status_code=503, detail=ml_status)
         now = datetime.now(timezone.utc).isoformat(timespec="seconds")
         connection.execute(
-            """UPDATE applications SET ml_prediction = ?, ml_confidence = ?, ml_status = ?,
-               ml_eligible = ?, updated_at = ? WHERE id = ?""",
-            (predicted, confidence, ml_status, eligible, now, application_id),
+            """UPDATE applications SET jarak_km = ?, ml_prediction = ?, ml_confidence = ?,
+               ml_status = ?, ml_eligible = ?, updated_at = ? WHERE id = ?""",
+            (
+                location["jarak_km"],
+                prediction,
+                confidence,
+                ml_status,
+                eligible,
+                now,
+                application_id,
+            ),
+        )
+        inspection_status = (
+            "Berpotensi Tidak Sesuai"
+            if not location["inside_north_sulawesi"]
+            or prediction != application["category"]
+            else "Sesuai Kategori"
         )
         connection.execute(
             "INSERT INTO inspections ("
             "student_id, nama_mahasiswa, nama_kost, alamat_kost, kelurahan, "
             "jarak_km, waktu_tempuh_menit, akses_jalan, kategori_terdaftar, "
-            "prediksi_kategori, confidence_score, status, keterangan, tanggal_pemeriksaan"
-            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "prediksi_kategori, confidence_score, status, keterangan, tanggal_pemeriksaan, maps_url"
+            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 application["student_email"],
                 application["nama_mahasiswa"],
@@ -638,11 +1177,12 @@ def analyze_application(
                 int(application["waktu_tempuh_menit"]),
                 application["akses_jalan"],
                 application["category"],
-                predicted,
+                prediction,
                 confidence,
-                "Sesuai Kategori" if predicted == application["category"] else "Berpotensi Tidak Sesuai",
+                inspection_status,
                 ml_status,
                 now,
+                application["maps_url"],
             ),
         )
         updated = connection.execute(
@@ -671,6 +1211,26 @@ def decide_application(
             raise HTTPException(status_code=404, detail="Pengajuan tidak ditemukan.")
         application = as_dict(application)
         if payload.status == "Disetujui":
+            if application["residence_type"] in {"Kost putra", "Kost putri"}:
+                kost = connection.execute(
+                    "SELECT approval_status, location_anomaly, maps_url FROM kosts WHERE id = ?",
+                    (application["kost_id"],),
+                ).fetchone()
+                if (
+                    kost is None
+                    or kost["approval_status"] != "Disetujui"
+                    or kost["location_anomaly"]
+                    or not kost["maps_url"]
+                ):
+                    raise HTTPException(
+                        status_code=409,
+                        detail="Kost harus tetap berstatus Disetujui sebelum pengajuan dapat disetujui.",
+                    )
+                if application["kost_confirmation_status"] != "Dikonfirmasi":
+                    raise HTTPException(
+                        status_code=409,
+                        detail="Pemilik kost harus mengonfirmasi status penghuni sebelum pengajuan disetujui.",
+                    )
             if not application["ml_prediction"]:
                 raise HTTPException(
                     status_code=409,
@@ -688,24 +1248,31 @@ def decide_application(
         )
         if payload.status == "Disetujui" and application["ml_eligible"]:
             student_id = f"APP-{application_id:05d}"
-            existing = connection.execute(
-                "SELECT id FROM students WHERE id = ?", (student_id,)
-            ).fetchone()
-            if existing is None:
-                connection.execute(
-                    """INSERT INTO students (
-                        id, nama_mahasiswa, nama_kost, alamat_kost, kelurahan,
-                        jarak_km, kategori_terdaftar
-                    ) VALUES (?, ?, ?, ?, ?, ?, 'Outsider Jauh')""",
-                    (
-                        student_id,
-                        application["nama_mahasiswa"],
-                        application["nama_kost"],
-                        application["alamat_kost"],
-                        application["kelurahan"],
-                        application["jarak_km"],
-                    ),
-                )
+            connection.execute(
+                """INSERT INTO students (
+                    id, nama_mahasiswa, nama_kost, alamat_kost, kelurahan,
+                    jarak_km, kategori_terdaftar, maps_url, location_anomaly
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)
+                ON CONFLICT(id) DO UPDATE SET
+                    nama_mahasiswa = excluded.nama_mahasiswa,
+                    nama_kost = excluded.nama_kost,
+                    alamat_kost = excluded.alamat_kost,
+                    kelurahan = excluded.kelurahan,
+                    jarak_km = excluded.jarak_km,
+                    kategori_terdaftar = excluded.kategori_terdaftar,
+                    maps_url = excluded.maps_url,
+                    location_anomaly = excluded.location_anomaly""",
+                (
+                    student_id,
+                    application["nama_mahasiswa"],
+                    application["nama_kost"],
+                    application["alamat_kost"],
+                    application["kelurahan"],
+                    application["jarak_km"],
+                    application["ml_prediction"],
+                    application["maps_url"],
+                ),
+            )
         connection.execute(
             "INSERT INTO audit_logs (actor_email, action, object_type, object_id, occurred_at) "
             "VALUES (?, ?, 'application', ?, ?)",
@@ -782,33 +1349,46 @@ def list_students(
 
 @app.post("/api/students", response_model=Student, status_code=201)
 def create_student(student: StudentCreate, _user: dict = Depends(require_admin)):
+    if not student.maps_url:
+        raise HTTPException(status_code=422, detail="Tautan Google Maps lokasi wajib diisi.")
+    location = location_assessment(student.maps_url, get_settings()["campus_maps_url"])
+    values = student.model_dump()
+    values["jarak_km"] = location["jarak_km"]
+    values["location_anomaly"] = not location["inside_north_sulawesi"]
     try:
         with get_connection() as connection:
             connection.execute(
                 """INSERT INTO students
-                (id, nama_mahasiswa, nama_kost, alamat_kost, kelurahan, jarak_km, kategori_terdaftar)
-                VALUES (:id, :nama_mahasiswa, :nama_kost, :alamat_kost, :kelurahan, :jarak_km, :kategori_terdaftar)""",
-                student.model_dump(),
+                (id, nama_mahasiswa, nama_kost, alamat_kost, kelurahan, jarak_km, kategori_terdaftar, maps_url, location_anomaly)
+                VALUES (:id, :nama_mahasiswa, :nama_kost, :alamat_kost, :kelurahan, :jarak_km, :kategori_terdaftar, :maps_url, :location_anomaly)""",
+                values,
             )
     except sqlite3.IntegrityError as error:
         if "UNIQUE constraint failed" in str(error):
             raise HTTPException(status_code=409, detail="ID mahasiswa tersebut sudah digunakan.") from error
         raise
-    return student
+    return values
 
 
 @app.put("/api/students/{student_id}", response_model=Student)
 def update_student(student_id: str, student: StudentUpdate, _user: dict = Depends(require_admin)):
+    if not student.maps_url:
+        raise HTTPException(status_code=422, detail="Tautan Google Maps lokasi wajib diisi.")
+    location = location_assessment(student.maps_url, get_settings()["campus_maps_url"])
+    values = student.model_dump()
+    values["jarak_km"] = location["jarak_km"]
+    values["location_anomaly"] = not location["inside_north_sulawesi"]
     with get_connection() as connection:
         cursor = connection.execute(
             """UPDATE students SET nama_mahasiswa=:nama_mahasiswa, nama_kost=:nama_kost,
             alamat_kost=:alamat_kost, kelurahan=:kelurahan, jarak_km=:jarak_km,
-            kategori_terdaftar=:kategori_terdaftar WHERE id=:id""",
-            {**student.model_dump(), "id": student_id},
+            kategori_terdaftar=:kategori_terdaftar, maps_url=:maps_url,
+            location_anomaly=:location_anomaly WHERE id=:id""",
+            {**values, "id": student_id},
         )
         if cursor.rowcount == 0:
             raise HTTPException(status_code=404, detail="Data mahasiswa tidak ditemukan.")
-    return {"id": student_id, **student.model_dump()}
+    return {"id": student_id, **values}
 
 
 @app.delete("/api/students/{student_id}")
@@ -827,21 +1407,36 @@ def analyze_inspection(payload: InspectionInput, _user: dict = Depends(require_a
             status_code=503,
             detail=model_error or "Model ML belum siap. Pemeriksaan tidak dapat dianalisis.",
         )
+    if not payload.maps_url:
+        raise HTTPException(
+            status_code=422,
+            detail="Tautan Google Maps lokasi wajib diisi agar jarak dan batas provinsi dapat diverifikasi.",
+        )
+    location = None
+    if payload.maps_url:
+        location = location_assessment(
+            payload.maps_url, get_settings()["campus_maps_url"]
+        )
+        payload = payload.model_copy(update={"jarak_km": location["jarak_km"]})
     sample = pd.DataFrame(
         [{name: getattr(payload, name) for name in model_features}],
         columns=model_features,
     )
-    probabilities = model.predict_proba(sample)[0]
-    best_index = int(probabilities.argmax())
-    predicted = classify_distance(payload.jarak_km)
-    confidence = model_accuracy()
-    mismatch = payload.kategori_terdaftar != predicted
+    predicted, confidence = predict_category(sample)
+    outside_region = location is not None and not location["inside_north_sulawesi"]
+    mismatch = payload.kategori_terdaftar != predicted or outside_region
     if mismatch:
         status = "Berpotensi Tidak Sesuai"
-        explanation = (
-            f"Prediksi model ({predicted}) berbeda dari kategori terdaftar "
-            f"({payload.kategori_terdaftar}); pemeriksaan administratif lanjutan disarankan."
-        )
+        if outside_region:
+            explanation = (
+                "Koordinat lokasi berada di luar batas Sulawesi Utara; "
+                "data ditandai sebagai anomali dan perlu verifikasi petugas."
+            )
+        else:
+            explanation = (
+                f"Prediksi model ({predicted}) berbeda dari kategori terdaftar "
+                f"({payload.kategori_terdaftar}); pemeriksaan administratif lanjutan disarankan."
+            )
     else:
         status = "Sesuai Kategori"
         explanation = (
@@ -862,11 +1457,13 @@ def analyze_inspection(payload: InspectionInput, _user: dict = Depends(require_a
             """INSERT INTO inspections (
                 student_id, nama_mahasiswa, nama_kost, alamat_kost, kelurahan,
                 jarak_km, waktu_tempuh_menit, akses_jalan, kategori_terdaftar,
-                prediksi_kategori, confidence_score, status, keterangan, tanggal_pemeriksaan
+                prediksi_kategori, confidence_score, status, keterangan, tanggal_pemeriksaan,
+                maps_url
             ) VALUES (
                 :student_id, :nama_mahasiswa, :nama_kost, :alamat_kost, :kelurahan,
                 :jarak_km, :waktu_tempuh_menit, :akses_jalan, :kategori_terdaftar,
-                :prediksi_kategori, :confidence_score, :status, :keterangan, :tanggal_pemeriksaan
+                :prediksi_kategori, :confidence_score, :status, :keterangan, :tanggal_pemeriksaan,
+                :maps_url
             )""",
             values,
         )
@@ -902,7 +1499,12 @@ def read_settings(_user: dict = Depends(require_admin)):
 
 @app.put("/api/settings", response_model=Settings)
 def update_settings(settings: Settings, _user: dict = Depends(require_admin)):
-    return save_settings(settings.model_dump())
+    return save_settings(settings.model_dump(mode="json"))
+
+
+@app.get("/api/registration-period")
+def read_registration_period(_user: dict = Depends(require_student)):
+    return registration_period(get_settings())
 
 
 @app.get("/api/ml/info")

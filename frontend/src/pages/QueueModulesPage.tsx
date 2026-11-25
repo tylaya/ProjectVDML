@@ -48,7 +48,7 @@ export function QueueModulesPage({ onRun, busy }: {
   };
 
   return <div className="space-y-6">
-    <header><h2 className="text-xl font-bold text-royal">Laboratorium Modul Antrean ML</h2><p className="mt-1 text-sm text-slate-500">Simulasi satu minggu pendaftaran awal semester, sebelum pembayaran dan kontrak mata kuliah.</p></header>
+    <header><h2 className="text-xl font-bold text-royal">Simulasi Layanan Awal Semester</h2><p className="mt-1 text-sm text-slate-500">Simulasi satu kali untuk lima hari layanan pada pembukaan semester; bukan analisis mingguan berulang.</p></header>
     <div role="note" className="rounded-xl border border-amber-300 bg-amber-50 p-4 text-sm leading-relaxed text-amber-950">
       <b>Mode simulasi saja.</b> Data seluruhnya sintetis. Tidak membuat slot, tiket, check-in, notifikasi, atau antrean nyata; tidak membaca/menyimpan data mahasiswa. Jam Senin–Jumat 08.00–17.00 mengikuti asumsi awal. Jumlah loket, volume, dokumen, serta aturan triase masih contoh dan perlu dikonfirmasi.
     </div>
@@ -78,7 +78,7 @@ export function QueueModulesPage({ onRun, busy }: {
           <p className="text-xs leading-relaxed text-slate-500">{result.modules.M1.model}. MAE diuji pada pembagian data sintetis, bukan data layanan kampus.</p>
         </ModuleCard>
         <ModuleCard title="M2 · Perkiraan beban pendaftaran">
-          <p className="text-sm text-slate-600">Rata-rata prediksi: <b>{result.modules.M2.forecast_total}</b> pendaftar per minggu.</p>
+          <p className="text-sm text-slate-600">Perkiraan total: <b>{result.modules.M2.forecast_total}</b> pendaftar dalam lima hari layanan.</p>
           <div className="space-y-3">{result.modules.M2.forecast.map(day => <div key={day.weekday}><div className="mb-1 flex justify-between text-xs"><span>{day.weekday} · puncak {day.peak_hour}</span><b>{day.expected_applicants}/hari</b></div><div className="h-2 overflow-hidden rounded-full bg-slate-100"><div className="h-full rounded-full bg-royal" style={{ width: `${Math.min(100, day.expected_applicants / Math.max(1, ...result.modules.M2.forecast.map(item => item.expected_applicants)) * 100)}%` }} /></div></div>)}</div>
           <p className="text-xs leading-relaxed text-slate-500">{result.modules.M2.method}. Validasi sintetis: MAE harian {result.modules.M2.daily_mae_validation}, per jam {result.modules.M2.hourly_mae_validation} pendaftar. Angka bukan estimasi kampus.</p>
         </ModuleCard>

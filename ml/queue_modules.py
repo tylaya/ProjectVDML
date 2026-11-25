@@ -631,7 +631,7 @@ def run_synthetic_week(
             },
             "M2": {
                 "status": "demo",
-                "method": "Rata-rata per hari/jam dari empat minggu sintetis",
+                "method": "Rata-rata per hari/jam dari empat periode sintetis lima hari",
                 "daily_mae_validation": demand_metrics["daily_mae"],
                 "hourly_mae_validation": demand_metrics["hourly_mae"],
                 "forecast": forecast,

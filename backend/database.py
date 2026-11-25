@@ -5,6 +5,8 @@ import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
 
+from location_analysis import is_in_north_sulawesi, parse_google_maps_coordinates
+
 
 BASE_DIR = Path(__file__).resolve().parent
 DATABASE_PATH = Path(os.environ.get("VILLAGE_DEAN_DB", BASE_DIR / "housing.db"))
@@ -16,6 +18,9 @@ DEFAULT_SETTINGS = {
     "distance_threshold_km": 2.0,
     "verification_zone_km": 0.2,
     "verification_zone_enabled": True,
+    "semester_name": "",
+    "semester_start_date": None,
+    "campus_maps_url": "",
 }
 
 
@@ -43,7 +48,9 @@ def init_db():
                 alamat_kost TEXT NOT NULL,
                 kelurahan TEXT NOT NULL,
                 jarak_km REAL NOT NULL,
-                kategori_terdaftar TEXT NOT NULL
+                kategori_terdaftar TEXT NOT NULL,
+                maps_url TEXT NOT NULL DEFAULT '',
+                location_anomaly INTEGER NOT NULL DEFAULT 0
             );
             CREATE TABLE IF NOT EXISTS inspections (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -60,7 +67,8 @@ def init_db():
                 confidence_score REAL NOT NULL,
                 status TEXT NOT NULL,
                 keterangan TEXT NOT NULL,
-                tanggal_pemeriksaan TEXT NOT NULL
+                tanggal_pemeriksaan TEXT NOT NULL,
+                maps_url TEXT NOT NULL DEFAULT ''
             );
             CREATE TABLE IF NOT EXISTS settings (
                 key TEXT PRIMARY KEY,
@@ -74,16 +82,35 @@ def init_db():
                 last_login_at TEXT NOT NULL,
                 password_hash TEXT
             );
+            CREATE TABLE IF NOT EXISTS kosts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                address TEXT NOT NULL,
+                kelurahan TEXT NOT NULL,
+                residence_type TEXT NOT NULL CHECK (residence_type IN ('Kost putra', 'Kost putri')),
+                owner_email TEXT NOT NULL,
+                approval_status TEXT NOT NULL DEFAULT 'Menunggu approval'
+                    CHECK (approval_status IN ('Menunggu approval', 'Disetujui', 'Ditolak')),
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                maps_url TEXT NOT NULL DEFAULT '',
+                location_anomaly INTEGER NOT NULL DEFAULT 0,
+                UNIQUE (name, address)
+            );
             CREATE TABLE IF NOT EXISTS applications (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 student_email TEXT NOT NULL REFERENCES users(email),
                 request_type TEXT NOT NULL,
                 category TEXT NOT NULL,
                 residence_type TEXT NOT NULL,
+                kost_id INTEGER REFERENCES kosts(id),
+                kost_confirmation_status TEXT NOT NULL DEFAULT 'Tidak diperlukan',
+                kost_confirmation_note TEXT NOT NULL DEFAULT '',
                 semester TEXT NOT NULL,
                 nama_mahasiswa TEXT NOT NULL DEFAULT '',
                 nama_kost TEXT NOT NULL DEFAULT '',
                 alamat_kost TEXT NOT NULL DEFAULT '',
+                maps_url TEXT NOT NULL DEFAULT '',
                 kelurahan TEXT NOT NULL DEFAULT '',
                 jarak_km REAL NOT NULL DEFAULT 0,
                 waktu_tempuh_menit INTEGER NOT NULL DEFAULT 0,
@@ -105,11 +132,18 @@ def init_db():
                 object_id TEXT NOT NULL,
                 occurred_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS password_reset_tokens (
+                email TEXT PRIMARY KEY REFERENCES users(email) ON DELETE CASCADE,
+                token_hash TEXT NOT NULL UNIQUE,
+                expires_at TEXT NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS application_documents (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 application_id INTEGER NOT NULL REFERENCES applications(id) ON DELETE CASCADE,
                 document_type TEXT NOT NULL CHECK (
-                    document_type IN ('ktp', 'kartu_keluarga')
+                    document_type IN (
+                        'ktp', 'kartu_keluarga', 'surat_penerimaan_kost', 'surat_domisili'
+                    )
                 ),
                 storage_key TEXT NOT NULL UNIQUE,
                 content_type TEXT NOT NULL,
@@ -118,15 +152,77 @@ def init_db():
             );
             """
         )
+        document_table = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'application_documents'"
+        ).fetchone()
+        if document_table and "surat_domisili" not in document_table["sql"]:
+            connection.executescript(
+                """
+                CREATE TABLE application_documents_new (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    application_id INTEGER NOT NULL REFERENCES applications(id) ON DELETE CASCADE,
+                    document_type TEXT NOT NULL CHECK (
+                        document_type IN (
+                            'ktp', 'kartu_keluarga', 'surat_penerimaan_kost', 'surat_domisili'
+                        )
+                    ),
+                    storage_key TEXT NOT NULL UNIQUE,
+                    content_type TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    UNIQUE (application_id, document_type)
+                );
+                INSERT INTO application_documents_new
+                    (id, application_id, document_type, storage_key, content_type, created_at)
+                SELECT id, application_id, document_type, storage_key, content_type, created_at
+                FROM application_documents;
+                DROP TABLE application_documents;
+                ALTER TABLE application_documents_new RENAME TO application_documents;
+                """
+            )
         user_columns = {
             row["name"] for row in connection.execute("PRAGMA table_info(users)")
         }
         if "password_hash" not in user_columns:
             connection.execute("ALTER TABLE users ADD COLUMN password_hash TEXT")
+        for table in ("students", "inspections", "kosts", "applications"):
+            columns = {
+                row["name"] for row in connection.execute(f"PRAGMA table_info({table})")
+            }
+            if "maps_url" not in columns:
+                connection.execute(
+                    f"ALTER TABLE {table} ADD COLUMN maps_url TEXT NOT NULL DEFAULT ''"
+                )
+        kost_columns = {
+            row["name"] for row in connection.execute("PRAGMA table_info(kosts)")
+        }
+        if "location_anomaly" not in kost_columns:
+            connection.execute(
+                "ALTER TABLE kosts ADD COLUMN location_anomaly INTEGER NOT NULL DEFAULT 0"
+            )
+            for kost in connection.execute("SELECT id, maps_url FROM kosts").fetchall():
+                try:
+                    coordinates = parse_google_maps_coordinates(kost["maps_url"])
+                    anomaly = not is_in_north_sulawesi(*coordinates)
+                except ValueError:
+                    anomaly = True
+                connection.execute(
+                    "UPDATE kosts SET location_anomaly = ? WHERE id = ?",
+                    (anomaly, kost["id"]),
+                )
+        student_columns = {
+            row["name"] for row in connection.execute("PRAGMA table_info(students)")
+        }
+        if "location_anomaly" not in student_columns:
+            connection.execute(
+                "ALTER TABLE students ADD COLUMN location_anomaly INTEGER NOT NULL DEFAULT 0"
+            )
         application_columns = {
             row["name"] for row in connection.execute("PRAGMA table_info(applications)")
         }
         application_migrations = {
+            "kost_id": "INTEGER REFERENCES kosts(id)",
+            "kost_confirmation_status": "TEXT NOT NULL DEFAULT 'Tidak diperlukan'",
+            "kost_confirmation_note": "TEXT NOT NULL DEFAULT ''",
             "nama_mahasiswa": "TEXT NOT NULL DEFAULT ''",
             "nama_kost": "TEXT NOT NULL DEFAULT ''",
             "alamat_kost": "TEXT NOT NULL DEFAULT ''",
@@ -206,7 +302,10 @@ def seed_students(connection):
         ("VD-DEMO-008", "Mahasiswa Demo 08", "Pondok Atas", "Airmadidi Atas", "Airmadidi Atas", 2.1, "Outsider Jauh"),
     ]
     connection.executemany(
-        "INSERT INTO students VALUES (?, ?, ?, ?, ?, ?, ?)",
+        """INSERT INTO students (
+            id, nama_mahasiswa, nama_kost, alamat_kost, kelurahan,
+            jarak_km, kategori_terdaftar
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)""",
         samples,
     )
 

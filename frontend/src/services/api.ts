@@ -1,4 +1,4 @@
-import type { Application, ApplicationDecision, ApplicationInput, AuthUser, Dashboard, Inspection, InspectionInput, LoginRole, ModelInfo, QueueModulesResult, QueueSimulationInput, Settings, Student } from '../types';
+import type { Application, ApplicationDecision, ApplicationInput, AuthUser, Dashboard, Inspection, InspectionInput, Kost, LoginRole, ModelInfo, QueueModulesResult, QueueSimulationInput, RegistrationPeriod, Settings, Student } from '../types';
 
 const API_URL = import.meta.env.VITE_API_URL ?? '';
 
@@ -37,15 +37,25 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ credential, email, requested_role }),
     }),
-  passwordLogin: (email: string, password: string) =>
+  passwordLogin: (email: string, password: string, requested_role?: LoginRole) =>
     request<AuthUser>('/api/auth/login', {
       method: 'POST',
-      body: JSON.stringify({ email, password }),
+      body: JSON.stringify({ email, password, ...(requested_role ? { requested_role } : {}) }),
     }),
   registerStudent: (credential: string, email: string, password: string) =>
     request<AuthUser>('/api/auth/register', {
       method: 'POST',
       body: JSON.stringify({ credential, email, password }),
+    }),
+  requestPasswordReset: (email: string) =>
+    request<{ message: string }>('/api/auth/password-reset/request', {
+      method: 'POST',
+      body: JSON.stringify({ email }),
+    }),
+  resetPassword: (token: string, password: string) =>
+    request<{ message: string }>('/api/auth/password-reset', {
+      method: 'POST',
+      body: JSON.stringify({ token, password }),
     }),
   logout: () => request<{ message: string }>('/api/auth/logout', { method: 'POST' }),
   myApplications: () => request<Application[]>('/api/applications/me'),
@@ -53,14 +63,26 @@ export const api = {
     application: ApplicationInput,
     ktp: File | null,
     kartuKeluarga: File | null,
+    residenceProof: File | null,
   ) => {
     const body = new FormData();
     body.append('payload', JSON.stringify(application));
     if (ktp) body.append('ktp', ktp);
     if (kartuKeluarga) body.append('kartu_keluarga', kartuKeluarga);
+    if (residenceProof) {
+      body.append(
+        application.residence_type === 'Kost putra' || application.residence_type === 'Kost putri'
+          ? 'surat_penerimaan_kost'
+          : 'surat_domisili',
+        residenceProof,
+      );
+    }
     return request<Application>('/api/applications/with-documents', { method: 'POST', body });
   },
-  downloadApplicationDocument: async (id: number, documentType: 'ktp' | 'kartu_keluarga') => {
+  downloadApplicationDocument: async (
+    id: number,
+    documentType: 'ktp' | 'kartu_keluarga' | 'surat_penerimaan_kost' | 'surat_domisili',
+  ) => {
     let response: Response;
     try {
       response = await fetch(
@@ -85,6 +107,20 @@ export const api = {
     link.remove();
     window.setTimeout(() => URL.revokeObjectURL(url), 1000);
   },
+  approvedKosts: () => request<Omit<Kost, 'owner_email' | 'approval_status' | 'created_at' | 'updated_at'>[]>('/api/kosts/approved'),
+  kosts: () => request<Kost[]>('/api/kosts'),
+  createKost: (input: Pick<Kost, 'name' | 'address' | 'maps_url' | 'kelurahan' | 'residence_type' | 'owner_email'>) =>
+    request<Kost>('/api/kosts', { method: 'POST', body: JSON.stringify(input) }),
+  updateKostLocation: (id: number, maps_url: string) =>
+    request<Kost>(`/api/kosts/${id}/location`, { method: 'PATCH', body: JSON.stringify({ maps_url }) }),
+  decideKost: (id: number, approval_status: 'Disetujui' | 'Ditolak') =>
+    request<Kost>(`/api/kosts/${id}/approval`, { method: 'PATCH', body: JSON.stringify({ approval_status }) }),
+  ownerApplications: () => request<Application[]>('/api/owner/applications'),
+  confirmKostOccupant: (id: number, status: 'Dikonfirmasi' | 'Ditolak', note: string) =>
+    request<Application>(`/api/owner/applications/${id}/confirmation`, {
+      method: 'PATCH',
+      body: JSON.stringify({ status, note }),
+    }),
   applications: () => request<Application[]>('/api/applications'),
   analyzeApplication: (id: number) =>
     request<Application>(`/api/applications/${id}/analyze`, { method: 'POST' }),
@@ -109,6 +145,7 @@ export const api = {
   settings: () => request<Settings>('/api/settings'),
   saveSettings: (settings: Settings) =>
     request<Settings>('/api/settings', { method: 'PUT', body: JSON.stringify(settings) }),
+  registrationPeriod: () => request<RegistrationPeriod>('/api/registration-period'),
   modelInfo: () => request<ModelInfo>('/api/ml/info'),
   queueDemo: (input: QueueSimulationInput) =>
     request<QueueModulesResult>('/api/ml/queue-demo', { method: 'POST', body: JSON.stringify(input) }),

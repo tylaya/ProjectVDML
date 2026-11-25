@@ -95,6 +95,7 @@ class VerifyGoogleCredentialTests(unittest.TestCase):
         self.assertEqual(error.exception.status_code, 403)
 
     def test_student_login_email_requires_eight_digit_id(self):
+        self.assertTrue(is_student_email("12410292@student.unklab.ac.id"))
         self.assertTrue(is_student_email("s22210609@student.unklab.ac.id"))
         self.assertFalse(is_student_email("student@student.unklab.ac.id"))
         self.assertFalse(is_student_email("s123@student.unklab.ac.id"))

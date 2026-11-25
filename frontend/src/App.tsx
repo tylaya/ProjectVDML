@@ -11,9 +11,11 @@ import { InspectionPage } from './pages/InspectionPage';
 import { SettingsPage } from './pages/SettingsPage';
 import { StudentsPage } from './pages/StudentsPage';
 import { QueueModulesPage } from './pages/QueueModulesPage';
-import type { Application, ApplicationDecision, ApplicationInput, AuthUser, Dashboard, Inspection, InspectionInput, LoginRole, ModelInfo, Page, QueueSimulationInput, Settings, Student } from './types';
+import { KostsPage } from './pages/KostsPage';
+import { KostOwnerPage } from './pages/KostOwnerPage';
+import type { Application, ApplicationDecision, ApplicationInput, AuthUser, Dashboard, Inspection, InspectionInput, Kost, LoginRole, ModelInfo, Page, QueueSimulationInput, RegistrationPeriod, Settings, Student } from './types';
 
-const initialSettings: Settings = { officer_name: 'Petugas Demo', officer_title: 'Verifikator Hunian', officer_unit: 'Village Dean — Universitas Klabat', confidence_threshold: 0.65, distance_threshold_km: 2, verification_zone_km: 0.2, verification_zone_enabled: true };
+const initialSettings: Settings = { officer_name: 'Petugas Demo', officer_title: 'Verifikator Hunian', officer_unit: 'Village Dean — Universitas Klabat', confidence_threshold: 0.65, distance_threshold_km: 2, verification_zone_km: 0.2, verification_zone_enabled: true, semester_name: '', semester_start_date: null, campus_maps_url: '' };
 export default function App() {
   const [page, setPage] = useState<Page>('dashboard');
   const [user, setUser] = useState<AuthUser | null>(null);
@@ -21,7 +23,17 @@ export default function App() {
   const [dashboard, setDashboard] = useState<Dashboard | null>(null);
   const [students, setStudents] = useState<Student[]>([]);
   const [applications, setApplications] = useState<Application[]>([]);
+  const [kosts, setKosts] = useState<Kost[]>([]);
+  const [approvedKosts, setApprovedKosts] = useState<Pick<Kost, 'id' | 'name' | 'address' | 'maps_url' | 'kelurahan' | 'residence_type'>[]>([]);
   const [settings, setSettings] = useState<Settings>(initialSettings);
+  const [registrationPeriod, setRegistrationPeriod] = useState<RegistrationPeriod>({
+    configured: false,
+    location_configured: false,
+    semester_name: '',
+    start_date: null,
+    end_date: null,
+    is_open: false,
+  });
   const [model, setModel] = useState<ModelInfo | null>(null);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(true);
@@ -30,6 +42,8 @@ export default function App() {
   const refreshDashboard = useCallback(async () => setDashboard(await api.dashboard()), []);
   const refreshStudents = useCallback(async () => setStudents(await api.students()), []);
   const refreshApplications = useCallback(async () => setApplications(user?.role === 'admin' ? await api.applications() : await api.myApplications()), [user]);
+  const refreshKosts = useCallback(async () => setKosts(await api.kosts()), []);
+  const refreshOwnerApplications = useCallback(async () => setApplications(await api.ownerApplications()), []);
   const loadPageData = useCallback(async (showLoading = true) => {
     if (showLoading) { setLoading(true); setError(''); }
     try {
@@ -59,12 +73,22 @@ export default function App() {
     if (user.role === 'admin') {
       void loadPageData();
       void refreshApplications().catch(reason => setError(reason instanceof Error ? reason.message : 'Daftar pengajuan gagal dimuat.'));
+      void refreshKosts().catch(reason => setError(reason instanceof Error ? reason.message : 'Daftar kost gagal dimuat.'));
+    } else if (user.role === 'student') {
+      setLoading(true);
+      Promise.all([
+        refreshApplications(),
+        api.approvedKosts().then(setApprovedKosts),
+        api.registrationPeriod().then(setRegistrationPeriod),
+      ])
+        .catch(reason => setError(reason instanceof Error ? reason.message : 'Data portal mahasiswa gagal dimuat.'))
+        .finally(() => setLoading(false));
     } else {
       setLoading(true);
-      refreshApplications().catch(reason => setError(reason instanceof Error ? reason.message : 'Riwayat pengajuan gagal dimuat.'))
+      refreshOwnerApplications().catch(reason => setError(reason instanceof Error ? reason.message : 'Daftar penghuni kost gagal dimuat.'))
         .finally(() => setLoading(false));
     }
-  }, [user, loadPageData, refreshApplications]);
+  }, [user, loadPageData, refreshApplications, refreshKosts, refreshOwnerApplications]);
   useEffect(() => {
     if (!user || user.role !== 'admin' || loading || !error || dashboard) return;
     let active = true;
@@ -82,16 +106,36 @@ export default function App() {
     finally { setBusy(false); }
   };
   const saveSettings = async (value: Settings) => run(async () => { setSettings(await api.saveSettings(value)); });
-  const submitApplication = async (value: ApplicationInput, ktp: File | null, kartuKeluarga: File | null) => run(async () => {
-    await api.submitApplication(value, ktp, kartuKeluarga);
+  const submitApplication = async (value: ApplicationInput, ktp: File | null, kartuKeluarga: File | null, residenceProof: File | null) => run(async () => {
+    await api.submitApplication(value, ktp, kartuKeluarga, residenceProof);
     await refreshApplications();
   });
   const decideApplication = async (id: number, decision: ApplicationDecision) => run(async () => {
     await api.decideApplication(id, decision);
-    await refreshApplications();
+    if (decision.status === 'Disetujui') {
+      await Promise.all([refreshApplications(), refreshStudents(), refreshDashboard()]);
+    } else {
+      await refreshApplications();
+    }
   });
-  const downloadApplicationDocument = async (id: number, documentType: 'ktp' | 'kartu_keluarga') => run(async () => {
+  const downloadApplicationDocument = async (id: number, documentType: 'ktp' | 'kartu_keluarga' | 'surat_penerimaan_kost' | 'surat_domisili') => run(async () => {
     await api.downloadApplicationDocument(id, documentType);
+  });
+  const createKost = async (item: Pick<Kost, 'name' | 'address' | 'maps_url' | 'kelurahan' | 'residence_type' | 'owner_email'>) => run(async () => {
+    await api.createKost(item);
+    await refreshKosts();
+  });
+  const updateKostLocation = async (id: number, mapsUrl: string) => run(async () => {
+    await api.updateKostLocation(id, mapsUrl);
+    await Promise.all([refreshKosts(), api.approvedKosts().then(setApprovedKosts)]);
+  });
+  const decideKost = async (id: number, status: 'Disetujui' | 'Ditolak') => run(async () => {
+    await api.decideKost(id, status);
+    await Promise.all([refreshKosts(), api.approvedKosts().then(setApprovedKosts)]);
+  });
+  const confirmKostOccupant = async (id: number, status: 'Dikonfirmasi' | 'Ditolak', note: string) => run(async () => {
+    await api.confirmKostOccupant(id, status, note);
+    await refreshOwnerApplications();
   });
   const analyzeApplication = async (id: number): Promise<Application> => {
     let updated!: Application;
@@ -125,14 +169,16 @@ export default function App() {
     await api.login(credential, email, requestedRole);
     await establishSession();
   };
-  const passwordLogin = async (email: string, password: string) => {
-    await api.passwordLogin(email, password);
+  const passwordLogin = async (email: string, password: string, requestedRole?: LoginRole) => {
+    await api.passwordLogin(email, password, requestedRole);
     await establishSession();
   };
   const registerStudent = async (credential: string, email: string, password: string) => {
     await api.registerStudent(credential, email, password);
     await establishSession();
   };
+  const requestPasswordReset = async (email: string) => { await api.requestPasswordReset(email); };
+  const resetPassword = async (token: string, password: string) => { await api.resetPassword(token, password); };
   const logout = async () => {
     try {
       await api.logout();
@@ -149,16 +195,20 @@ export default function App() {
         onPasswordLogin={passwordLogin}
         onGoogleLogin={login}
         onRegister={registerStudent}
+        onRequestPasswordReset={requestPasswordReset}
+        onResetPassword={resetPassword}
       />
     );
   }
-  if (user.role === 'student') return <StudentPortalPage user={user} applications={applications} onSubmit={submitApplication} onLogout={() => void logout()} busy={busy} error={error} />;
+  if (user.role === 'student') return <StudentPortalPage user={user} applications={applications} kosts={approvedKosts} registrationPeriod={registrationPeriod} onSubmit={submitApplication} onLogout={() => void logout()} busy={busy} error={error} />;
+  if (user.role === 'kost_owner') return <KostOwnerPage user={user} applications={applications} onConfirm={confirmKostOccupant} onLogout={() => void logout()} busy={busy} error={error} />;
   if (error && !dashboard) return <div className="mx-auto mt-20 max-w-lg rounded-2xl border bg-white p-8 text-center"><h1 className="text-xl font-bold text-royal">Dashboard petugas belum tersedia</h1><p role="alert" className="my-4 text-sm text-rose-700">{error}</p><button onClick={() => void loadPageData()} className="rounded-lg bg-royal px-4 py-2 text-sm text-white">Coba lagi</button></div>;
   if (!dashboard || !model) return <div className="flex min-h-screen items-center justify-center text-sm text-slate-500">Memuat dashboard petugas…</div>;
   return <Layout page={page} onNavigate={setPage} settings={settings} pending={applications.filter(item => item.status === 'Menunggu verifikasi').length} onLogout={() => void logout()}>
     {error && <div role="alert" className="mb-5 flex items-center justify-between rounded-lg border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700"><span>{error}</span><button onClick={() => setError('')} aria-label="Tutup pesan">×</button></div>}
     {page === 'dashboard' && <DashboardPage data={dashboard} model={model} navigate={setPage} />}
     {page === 'applications' && <ApplicationsPage applications={applications} onAnalyze={analyzeApplication} onDecide={decideApplication} onDownloadDocument={downloadApplicationDocument} busy={busy} />}
+    {page === 'kosts' && <KostsPage kosts={kosts} onCreate={createKost} onUpdateLocation={updateKostLocation} onDecide={decideKost} busy={busy} />}
     {page === 'students' && <StudentsPage students={students} onCreate={createStudent} onUpdate={updateStudent} onDelete={deleteStudent} busy={busy} />}
     {page === 'inspection' && <InspectionPage students={students} onAnalyze={analyze} busy={busy} modelAvailable={model.status === 'ready'} modelMessage={model.message} />}
     {page === 'queueModules' && <QueueModulesPage onRun={runQueueDemo} busy={busy} />}

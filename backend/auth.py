@@ -21,7 +21,7 @@ PASSWORD_HASH_BYTES = 64
 
 
 def is_student_email(email: str) -> bool:
-    return bool(re.fullmatch(r"s\d{8}@student\.unklab\.ac\.id", email.strip().lower()))
+    return bool(re.fullmatch(r"s?\d{8}@student\.unklab\.ac\.id", email.strip().lower()))
 
 
 def hash_password(password: str) -> str:
@@ -152,8 +152,22 @@ def verify_google_credential(
     if requested_role == "student" and not is_admin and not is_student_email(email):
         raise HTTPException(
             status_code=403,
-            detail="Gunakan email mahasiswa berformat s12345678@student.unklab.ac.id.",
+            detail="Gunakan email mahasiswa berformat 12345678 atau s12345678@student.unklab.ac.id.",
         )
+    if requested_role == "kost_owner":
+        from database import get_connection
+
+        with get_connection() as connection:
+            owner = connection.execute(
+                """SELECT 1 FROM kosts
+                   WHERE owner_email = ? AND approval_status = 'Disetujui' LIMIT 1""",
+                (email,),
+            ).fetchone()
+        if owner is None:
+            raise HTTPException(
+                status_code=403,
+                detail="Email ini belum terdaftar sebagai pemilik kost yang disetujui kampus.",
+            )
     return {
         "email": email,
         "name": str(claims.get("name", email)),
@@ -215,7 +229,7 @@ def current_user(request: Request) -> dict[str, str]:
         or not email
         or not isinstance(name, str)
         or not isinstance(role, str)
-        or role not in {"admin", "student"}
+        or role not in {"admin", "student", "kost_owner"}
     ):
         raise HTTPException(status_code=401, detail="Sesi tidak valid atau telah kedaluwarsa.")
     return {
@@ -236,4 +250,11 @@ def require_student(request: Request) -> dict[str, str]:
     user = current_user(request)
     if user["role"] != "student":
         raise HTTPException(status_code=403, detail="Fitur ini hanya tersedia untuk mahasiswa.")
+    return user
+
+
+def require_kost_owner(request: Request) -> dict[str, str]:
+    user = current_user(request)
+    if user["role"] != "kost_owner":
+        raise HTTPException(status_code=403, detail="Fitur ini hanya tersedia untuk pemilik kost.")
     return user

@@ -9,6 +9,8 @@ MAX_DOCUMENT_SIZE = 5 * 1024 * 1024
 DOCUMENT_TYPES = {
     "ktp": "KTP",
     "kartu_keluarga": "Kartu Keluarga",
+    "surat_penerimaan_kost": "Surat bukti terdaftar di kost",
+    "surat_domisili": "Surat keterangan domisili dari RT/RW atau pemerintah setempat",
 }
 DOCUMENT_FORMATS = {
     ".pdf": ("application/pdf", lambda data: data.startswith(b"%PDF-")),

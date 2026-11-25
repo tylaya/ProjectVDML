@@ -3,6 +3,7 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 from fastapi import HTTPException
+import pandas as pd
 from starlette.requests import Request
 from starlette.responses import Response
 
@@ -11,35 +12,18 @@ from auth import current_user, hash_password
 from schemas import GoogleCredential, PasswordLogin, StudentRegistration
 
 
-class DistanceClassificationTests(unittest.TestCase):
-    def test_distance_threshold_categories(self):
-        cases = (
-            (0.1, "Outsider Dekat"),
-            (2.0, "Outsider Dekat"),
-            (2.1, "Outsider Jauh"),
-            (4.0, "Outsider Jauh"),
-        )
-        for distance, expected in cases:
-            with self.subTest(distance=distance):
-                self.assertEqual(main.classify_distance(distance), expected)
+class ModelClassificationTests(unittest.TestCase):
+    def test_analysis_uses_model_prediction_and_sample_confidence(self):
+        classifier = MagicMock()
+        classifier.predict.return_value = ["Outsider Dekat"]
+        classifier.predict_proba.return_value = [[0.83, 0.17]]
+        sample = pd.DataFrame([{"jarak_km": 4.0}])
 
-    def test_registered_category_mismatch_status(self):
-        cases = (
-            (1.0, "Outsider Dekat", "Sesuai Kategori"),
-            (2.0, "Outsider Dekat", "Sesuai Kategori"),
-            (2.1, "Outsider Dekat", "Berpotensi Tidak Sesuai"),
-            (4.0, "Outsider Dekat", "Berpotensi Tidak Sesuai"),
-            (1.0, "Outsider Jauh", "Berpotensi Tidak Sesuai"),
-        )
-        for distance, registered, expected in cases:
-            predicted = main.classify_distance(distance)
-            status = (
-                "Sesuai Kategori"
-                if predicted == registered
-                else "Berpotensi Tidak Sesuai"
-            )
-            with self.subTest(distance=distance, registered=registered):
-                self.assertEqual(status, expected)
+        with patch.object(main, "model", classifier):
+            prediction, confidence = main.predict_category(sample)
+
+        self.assertEqual(prediction, "Outsider Dekat")
+        self.assertEqual(confidence, 0.83)
 
 
 class AuthRouteSessionTests(unittest.TestCase):
@@ -66,6 +50,7 @@ class AuthRouteSessionTests(unittest.TestCase):
     def test_google_login_sets_cookie_used_by_me_for_each_role(self):
         test_cases = (
             ("adminvd@unklab.ac.id", "admin"),
+            ("12410292@student.unklab.ac.id", "student"),
             ("s22210609@student.unklab.ac.id", "student"),
         )
         for email, role in test_cases:
@@ -140,6 +125,61 @@ class AuthRouteSessionTests(unittest.TestCase):
 
         self.assertEqual(user["role"], "admin")
         self.assertEqual(profile["email"], "adminvd@unklab.ac.id")
+
+    def test_admin_can_choose_student_role_during_password_login(self):
+        admin_hash = hash_password("test-admin-password")
+        connection_context = MagicMock()
+        connection_context.__enter__.return_value = MagicMock()
+        with patch.dict(
+            os.environ,
+            {
+                "SESSION_SECRET": "s" * 48,
+                "ADMIN_EMAILS": "adminVD@unklab.ac.id",
+                "ADMIN_PASSWORD_HASH": admin_hash,
+                "COOKIE_SECURE": "false",
+                "COOKIE_SAMESITE": "lax",
+            },
+            clear=True,
+        ), patch("main.get_connection", return_value=connection_context):
+            response = Response()
+            user = main.login_with_password(
+                PasswordLogin(
+                    email="ADMINVD@unklab.ac.id",
+                    password="test-admin-password",
+                    requested_role="student",
+                ),
+                self.request("localhost"),
+                response,
+            )
+            cookie_value = response.headers["set-cookie"].split(";", 1)[0]
+            profile = main.read_current_user(
+                current_user(self.request("localhost", cookie_value))
+            )
+
+        self.assertEqual(user["role"], "student")
+        self.assertEqual(profile["role"], "student")
+
+    def test_student_cannot_choose_admin_role_during_password_login(self):
+        with patch.dict(
+            os.environ,
+            {
+                "SESSION_SECRET": "s" * 48,
+                "ADMIN_EMAILS": "adminVD@unklab.ac.id",
+            },
+            clear=True,
+        ):
+            with self.assertRaises(HTTPException) as error:
+                main.login_with_password(
+                    PasswordLogin(
+                        email="s22210609@student.unklab.ac.id",
+                        password="student-password",
+                        requested_role="admin",
+                    ),
+                    self.request("localhost"),
+                    Response(),
+                )
+
+        self.assertEqual(error.exception.status_code, 403)
 
     def test_password_login_rejects_wrong_admin_password(self):
         admin_hash = hash_password("test-admin-password")
@@ -265,6 +305,14 @@ class AuthRouteSessionTests(unittest.TestCase):
                 email="student@student.unklab.ac.id",
                 password="student-test-password",
             )
+        self.assertEqual(
+            StudentRegistration(
+                credential="x" * 20,
+                email="12410292@student.unklab.ac.id",
+                password="student-test-password",
+            ).email,
+            "12410292@student.unklab.ac.id",
+        )
 
 
 if __name__ == "__main__":

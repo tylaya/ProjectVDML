@@ -2,10 +2,11 @@ import { useState } from 'react';
 import type { FormEvent } from 'react';
 import { AlertTriangle, CheckCircle2 } from 'lucide-react';
 import { CategoryBadge, StatusBadge } from '../components/StatusBadge';
+import { GoogleMapsDirectionsLink } from '../components/GoogleMapsDirectionsLink';
 import { HOME_ADDRESS_OPTION, HOME_NAME_OPTION, ResidenceField } from '../components/ResidenceField';
 import type { Category, Inspection, InspectionInput, RoadAccess, Student } from '../types';
 
-const empty: InspectionInput = { student_id: '', nama_mahasiswa: '', nama_kost: '', alamat_kost: '', kelurahan: 'Airmadidi Bawah', jarak_km: 1.5, waktu_tempuh_menit: 8, akses_jalan: 'Jalan Utama', kategori_terdaftar: 'Outsider Dekat' };
+const empty: InspectionInput = { student_id: '', nama_mahasiswa: '', nama_kost: '', alamat_kost: '', maps_url: '', kelurahan: 'Airmadidi Bawah', jarak_km: 1.5, waktu_tempuh_menit: 8, akses_jalan: 'Jalan Utama', kategori_terdaftar: 'Outsider Dekat' };
 export function InspectionPage({ students, onAnalyze, busy, modelAvailable, modelMessage }: { students: Student[]; onAnalyze: (data: InspectionInput) => Promise<Inspection>; busy: boolean; modelAvailable: boolean; modelMessage?: string }) {
   const [form, setForm] = useState<InspectionInput>(empty);
   const [selectedStudent, setSelectedStudent] = useState('');
@@ -15,7 +16,7 @@ export function InspectionPage({ students, onAnalyze, busy, modelAvailable, mode
   const choose = (id: string) => {
     const student = students.find(s => s.id === id);
     if (!student) { setForm(current => ({ ...current, student_id: id })); return; }
-    setForm({ student_id: student.id, nama_mahasiswa: student.nama_mahasiswa, nama_kost: student.nama_kost, alamat_kost: student.alamat_kost, kelurahan: student.kelurahan, jarak_km: student.jarak_km, waktu_tempuh_menit: Math.max(3, Math.round(student.jarak_km * 5)), akses_jalan: 'Jalan Utama', kategori_terdaftar: student.kategori_terdaftar });
+    setForm({ student_id: student.id, nama_mahasiswa: student.nama_mahasiswa, nama_kost: student.nama_kost, alamat_kost: student.alamat_kost, maps_url: student.maps_url, kelurahan: student.kelurahan, jarak_km: student.jarak_km, waktu_tempuh_menit: Math.max(3, Math.round(student.jarak_km * 5)), akses_jalan: 'Jalan Utama', kategori_terdaftar: student.kategori_terdaftar });
   };
   const submit = async (e: FormEvent) => {
     e.preventDefault(); setError('');
@@ -34,8 +35,10 @@ export function InspectionPage({ students, onAnalyze, busy, modelAvailable, mode
         <div className="grid gap-3 sm:grid-cols-2">{([['student_id', 'ID (bukan NIM)'], ['nama_mahasiswa', 'Nama mahasiswa']] as const).map(([key, label]) => <label key={key} className="text-xs font-medium text-slate-600">{label}<input required value={form[key]} onChange={e => change(key, e.target.value)} className="mt-1 w-full rounded-lg border px-3 py-2 text-sm" /></label>)}
           <ResidenceField label="Nama kost / hunian" value={form.nama_kost} options={residenceNames} onChange={value => change('nama_kost', value)} />
           <ResidenceField label="Alamat kost / area domisili" value={form.alamat_kost} options={residenceAddresses} onChange={value => change('alamat_kost', value)} />
+          <label className="text-xs font-medium text-slate-600 sm:col-span-2">Tautan lokasi Google Maps<input required type="url" maxLength={2048} value={form.maps_url} onChange={event => change('maps_url', event.target.value)} placeholder="Tautan lengkap dengan koordinat" className="mt-1 w-full rounded-lg border px-3 py-2 text-sm" /></label>
+          <div className="sm:col-span-2"><GoogleMapsDirectionsLink destination={[form.alamat_kost, form.kelurahan].filter(Boolean).join(', ')} /></div>
           <label className="text-xs font-medium text-slate-600">Kelurahan<input required value={form.kelurahan} onChange={e => change('kelurahan', e.target.value)} className="mt-1 w-full rounded-lg border px-3 py-2 text-sm" /></label>
-          <label className="text-xs font-medium text-slate-600">Jarak dari kampus (km)<input required type="number" min="0" step="0.1" value={form.jarak_km} onChange={e => change('jarak_km', Number(e.target.value))} className="mt-1 w-full rounded-lg border px-3 py-2 text-sm" /></label>
+          <p className="rounded-lg bg-slate-50 p-3 text-xs text-slate-600">Jarak dihitung otomatis dari tautan lokasi saat analisis.</p>
           <label className="text-xs font-medium text-slate-600">Waktu tempuh (menit)<input required type="number" min="1" value={form.waktu_tempuh_menit} onChange={e => change('waktu_tempuh_menit', Number(e.target.value))} className="mt-1 w-full rounded-lg border px-3 py-2 text-sm" /></label>
           <label className="text-xs font-medium text-slate-600">Akses jalan<select value={form.akses_jalan} onChange={e => change('akses_jalan', e.target.value as RoadAccess)} className="mt-1 w-full rounded-lg border bg-white px-3 py-2 text-sm"><option>Jalan Utama</option><option>Lorong</option><option>Perbukitan</option></select></label>
           <label className="text-xs font-medium text-slate-600">Kategori terdaftar<select value={form.kategori_terdaftar} onChange={e => change('kategori_terdaftar', e.target.value as Category)} className="mt-1 w-full rounded-lg border bg-white px-3 py-2 text-sm"><option>Outsider Dekat</option><option>Outsider Jauh</option></select></label>
